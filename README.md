@@ -9,12 +9,19 @@ answer with provenance.
                   ┌─────────────────── LangGraph outer loop ───────────────────┐
                   │                                                             │
 Goal ─▶  plan ─▶ execute ─▶ evaluate ──(structural failure: re-plan?)── yes ────┘
-       (LLM)   (run DAG)    (LLM decider)            │
-                  │                                  no
-                  ▼                                  ▼
-              Monitor                           synthesize ─▶ API
-        (status, trace,                        (LLM: combine +    (status / result /
-         tokens, cost)                          provenance)        trace, any time)
+       (LLM)      │       (LLM decider)            │
+                  ▼                                no
+              dispatch                            ▼
+                  │                          synthesize ─▶ API
+   ┌─────────┬────┴────┬──────────┐         (LLM: combine    (status / result /
+   ▼         ▼         ▼          ▼            + provenance)   trace, any time)
+ research  analysis   code      writing
+ web +     compute,  generate,  polished     Monitor: status, trace, tokens, cost
+ cites     compare,  explain,   prose +      (readable while the run is still live)
+           patterns  debug      format
+
+      the four specialist agents — the planner may only route to an (agent, action)
+      pair in the registry; every step runs as one of these four.
 ```
 
 - **Outer loop = LangGraph** — a fixed state machine (`plan → execute → evaluate → synthesize`) with
@@ -50,16 +57,26 @@ app/
       registry.py         # the post-LLM allowlist + capability catalog
       runs.py             # in-process registry of live monitors
     schemas/              # plan, run-state, config (pydantic)
-    sub_agents/           # the four specialist agents (research, analysis, code, writing)
-    general_utils/        # shared agent contract, model init, retry, cost capture
+    sub_agents/           # the four specialist agents (each a self-contained package)
+      research/           # grounded web research — Tavily search + cite sources
+      analysis/           # quantitative analysis; tools.py = deterministic compute tool
+      code/               # generate/explain/debug; nodes.py + routing.py (two-tier validation)
+      writing/            # polished prose with output-format control
+    general_utils/        # shared agent contract, model init, retry; tokens.py = cost estimation
 tests/                    # offline tests (fake agents/models) + run_all_tests.py
 Dockerfile, docker-compose.yml
 ```
 
 ## Run
 
-The whole platform runs as one container via Docker Compose — no local Python needed. It requires a
-Google Gemini API key (and, for the research agent's web search, an optional Tavily key).
+The whole platform runs as one container via Docker Compose — no local Python needed.
+
+> **API keys matter — set them in `app/.env` before running:**
+> - **`GOOGLE_API_KEY` (required)** — every LLM call (planner, the four agents, synthesizer) is
+>   Gemini. Without it the server starts but any `POST /tasks` fails.
+> - **`TAVILY_API_KEY` (strongly recommended)** — the Research Agent's live web search. Without it
+>   the research step has no grounded sources, so research-driven goals degrade badly. Optional only
+>   if you never run a research step.
 
 ### Quickstart on any machine (Docker, clean clone)
 
@@ -73,7 +90,7 @@ cd Agent-Orchestration-Platform-Assignment
 # 2. create your secrets file from the template
 cp app/.env.example app/.env          # Windows: copy app\.env.example app\.env
 
-# 3. edit app/.env -> set GOOGLE_API_KEY (required); TAVILY_API_KEY is optional (research)
+# 3. edit app/.env -> set GOOGLE_API_KEY (required); TAVILY_API_KEY (strongly recommended, research)
 
 # 4. build and run — Compose does everything: builds the image, installs deps, starts the server
 docker compose up --build             # legacy Docker: docker-compose up --build
