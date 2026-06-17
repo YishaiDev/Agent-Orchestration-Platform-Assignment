@@ -25,14 +25,14 @@ from app.src.general_utils.middleware import (
     build_compaction_middleware,
     build_token_cost_middleware,
 )
-from app.src.general_utils.tools import compute, think
+from app.src.general_utils.tokens import count_prompt_tokens
+from app.src.general_utils.tools import think
 from app.src.schemas.config import AnalysisAgentConfig, ModelPrice, get_config
 from app.src.sub_agents.analysis import prompts
 from app.src.sub_agents.analysis.schemas import Action, AnalysisContext, AnalysisSummary
+from app.src.sub_agents.analysis.tools import compute
 
 AGENT_NAME = "analysis"
-_AVG_INPUT_TOKENS = 1100
-_AVG_OUTPUT_TOKENS = 400
 _PREVIEW_MAX_CHARS = 6000
 
 
@@ -193,16 +193,18 @@ async def run_analysis_agent(
         price = app_cfg.pricing[cfg.model_id]
         ctx = _build_context(action, data, sources or [], step_id, session_id, cfg)
         agent = build_analysis_agent(model, summarizer, cfg, price)
+        initial = prompts.initial_messages(instruction, action, _data_preview(data))
         final = await agent.ainvoke(
-            {"messages": prompts.initial_messages(instruction, action, _data_preview(data))},
+            {"messages": initial},
             context=ctx,  # type: ignore[call-overload]
         )
         transcript = _transcript(final["messages"])
         summary, summary_tokens, summary_cost = await _summarize(
             summarizer, instruction, transcript, price
         )
+        input_tokens = count_prompt_tokens(initial, app_cfg.estimation.chars_per_token)
         est = estimate_cost(
-            price, cfg.max_compute_calls + 2, _AVG_INPUT_TOKENS, _AVG_OUTPUT_TOKENS
+            price, cfg.max_compute_calls + 2, input_tokens, cfg.avg_output_tokens
         )
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         return _assemble_result(

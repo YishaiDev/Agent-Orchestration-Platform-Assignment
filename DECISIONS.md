@@ -42,7 +42,7 @@ language by `has_validator(language)`:
   unverified state (`parses: false` + `validation_error`).
 - **Tier 2 — LLM critic, fallback only.** For languages with **no** registered parser (Ruby, Go,
   …) — the only signal where a parser can't reach. A **cheaper, independent** reviewer
-  (`review_model_id`, default `gemini-2.5-flash-lite`, temp 0) returns
+  (`review_model_id`, default `gemini-2.5-flash`, temp 0) returns
   `CodeVerdict{verdict: revise|return, issues}`; `revise` recalls the generator with concrete
   issues, bounded by `max_review_retries`. Independence (different model, temp 0) avoids the
   self-approval bias of a model grading its own output, at a fraction of the generator's cost.
@@ -124,6 +124,32 @@ scheduler: ✅ built.)**
 **Cycle detection:** Kahn's algorithm at plan-validation time; a plan whose steps cannot be fully
 topologically ordered is rejected **before** execution (no partial run on a cyclic plan).
 **(✅ built — `engine/validation.py::derive_parallel_groups` raises on any cycle.)**
+
+**Pre-execution cost estimate — measured prompt, not a flat constant.** The additive `est_cost_usd`
+is a *pre-run* forecast (distinct from `actual_cost_usd`, which the token-cost middleware measures
+from `usage_metadata` after the fact). It was first computed from a hardcoded per-agent
+`_AVG_INPUT_TOKENS` constant × expected calls, so two requests whose prompts differed 10× in size
+got an identical estimate. It now counts the **real assembled prompt** via
+`general_utils/tokens.py::count_prompt_tokens` (a character-ratio heuristic, `chars_per_token` in
+`app/config.yaml`), so the estimate scales with instruction + upstream context + data-preview size;
+only the genuinely-unknowable parts (output length, loop-turn count) stay as config knobs
+(`avg_output_tokens` per agent). **(✅ built — `general_utils/tokens.py`, wired into
+`sub_agents/{analysis,research,code}/agent.py`; unit-tested `tests/general_utils/test_tokens.py` —
+**5/5 PASS** covering empty prompts, real-length counting, monotonic growth with size, and
+`chars_per_token` sensitivity.)**
+
+**Design journey (how we got here):** flat per-agent constant → questioned directly (*"is there a
+better way to estimate the cost?"*); a web sweep **and** the `agent-building` cost-optimization
+reference both said the same thing — *count the real tokens, don't assume averages*. **Option A —
+call the provider tokenizer** (`get_num_tokens_from_messages`) for an exact count: rejected on
+Performance + Tests — Gemini's counter is a **synchronous network call**, and the agents are
+`async`, so invoking it on the hot path would block the event loop (killing the continuous
+concurrency §3 grades) and would fail on the injected offline test doubles, adding a network failure
+mode to what is only an estimate. **Option B — deterministic character-ratio over the real prompt**
+(chosen): captures the actual win (the estimate now tracks prompt size) with no blocking call, no new
+failure mode, and full determinism. The `agent-building` reference's own stance sealed it —
+*pre-execution estimates are inherently rough; the precise signal is the measured `actual_cost`* — so
+paying a per-run network round-trip for exactness on the *estimate* is the wrong trade.
 
 ---
 
@@ -295,11 +321,14 @@ swap `MemorySaver` for a durable checkpointer) so `GET /tasks/{id}` survives a r
 intermediate results** over the trace (SSE/WebSocket) instead of only returning them at the end —
 this is the one honest spec skip (nice-to-have); (4) add an **end-to-end live test** against the real
 Gemini/Tavily APIs behind a quota-gated CI flag, complementing the fully-offline suite that ships
-today; (5) **wire `output_format` through the API request body** — the synthesis judge's deterministic
-format check (`_check_format`) is built and tested, but the `POST /tasks` body doesn't yet surface
-`output_format`, so the check is dormant in production until a caller passes it (`run_task` already
-threads it; only the HTTP layer is unwired). This is a deliberate, documented stop-short, not a gap in
-the engine.
+today.
 
-> See `claude_docs/` for the per-component plans and the full requirements-compliance matrix
-> (`claude_docs/requirements_compliance.md`).
+> Closed during a spec-validation pass: item (5) of an earlier draft — wiring `output_format` through
+> the `POST /tasks` body so the synthesis judge's `_check_format` is no longer dormant — is now done.
+> While validating against the assignment's literal **Task Format**, I found the request model rejected
+> the spec's JSON-object `constraints` (422) and never surfaced `output_format`; `api/models.py::TaskRequest`
+> now accepts `constraints` as object **or** string (normalized to fenced planner text) and threads
+> `output_format` end-to-end. ✅
+
+> Component-level plans and the full requirements-compliance matrix are kept as internal working
+> notes outside the submission tree.

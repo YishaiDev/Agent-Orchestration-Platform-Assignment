@@ -45,6 +45,7 @@ def _spawn_run(registry: RunRegistry, deps_factory: DepsFactory, request: TaskRe
         request.session_id,
         deps=deps_factory(registry),
         max_replans=request.max_replans,
+        output_format=request.output_format,
         deadline_seconds=request.deadline_seconds,
     )
     registry.register_task(task_id, asyncio.create_task(coro))

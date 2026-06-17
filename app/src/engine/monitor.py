@@ -14,8 +14,11 @@ consulted: a failed step is *skippable* when independent non-optional work survi
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+from collections.abc import MutableMapping
 from datetime import UTC, datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -24,6 +27,19 @@ from app.src.schemas.plan import ExecutionPlan, ExecutionStep, StepStatus, TaskS
 from app.src.schemas.run_state import Progress
 
 _TERMINAL_LOST = {StepStatus.FAILED, StepStatus.SKIPPED, StepStatus.CANCELLED}
+
+logger = logging.getLogger("app.engine.monitor")
+
+
+class _RunLogAdapter(logging.LoggerAdapter[logging.Logger]):
+    """Logger adapter that prefixes every record with its task id for per-run traceability."""
+
+    def process(
+        self, msg: Any, kwargs: MutableMapping[str, Any]
+    ) -> tuple[Any, MutableMapping[str, Any]]:
+        """Prepend the bound task id to the log message."""
+        task_id = (self.extra or {}).get("task_id", "?")
+        return f"[task={task_id}] {msg}", kwargs
 
 
 class TraceEntry(BaseModel):
@@ -85,9 +101,7 @@ def classify_failure(
     survivors = [
         s
         for s in plan.steps
-        if s.id not in cascade
-        and not s.optional
-        and step_status.get(s.id) not in _TERMINAL_LOST
+        if s.id not in cascade and not s.optional and step_status.get(s.id) not in _TERMINAL_LOST
     ]
     return "skippable" if survivors else "structural"
 
@@ -125,6 +139,8 @@ class RunMonitor:
         self._cancel = asyncio.Event()
         self._replan = asyncio.Event()
         self._deadline = time.monotonic() + deadline_seconds if deadline_seconds else None
+        self._log = _RunLogAdapter(logger, {"task_id": task_id})
+        self._log.info("run created (deadline_seconds=%s)", deadline_seconds)
 
     def _touch(self) -> None:
         """Stamp the last-updated time."""
@@ -132,6 +148,7 @@ class RunMonitor:
 
     def set_state(self, state: TaskState) -> None:
         """Transition the task to ``state``."""
+        self._log.info("state %s -> %s", self.state.value, state.value)
         self.state = state
         self._touch()
 
@@ -143,6 +160,11 @@ class RunMonitor:
     def set_final_result(self, result: dict[str, object]) -> None:
         """Store the synthesized final result for the result endpoint."""
         self.final_result = result
+        self._log.info(
+            "final result ready (total_tokens=%d, total_cost_usd=%.4f)",
+            self.total_tokens,
+            self.total_cost_usd,
+        )
         self._touch()
 
     def attach_plan(self, plan: ExecutionPlan) -> None:
@@ -150,12 +172,14 @@ class RunMonitor:
         self.plan = plan
         for step in plan.steps:
             self.step_status.setdefault(step.id, StepStatus.PENDING)
+        self._log.info("plan attached (%d steps)", len(plan.steps))
         self._touch()
 
     def start_step(self, step: ExecutionStep) -> None:
         """Mark ``step`` running and record it as the current step."""
         self.step_status[step.id] = StepStatus.RUNNING
         self.current_step = step.id
+        self._log.info("step %s start (agent=%s, action=%s)", step.id, step.agent, step.action)
         self._touch()
 
     def _entry(self, step: ExecutionStep, result: AgentResult, status: StepStatus) -> TraceEntry:
@@ -171,6 +195,20 @@ class RunMonitor:
             output=result.output,
         )
 
+    def _log_result(self, result: AgentResult, status: StepStatus) -> None:
+        """Emit a per-step completion or failure log line."""
+        if status == StepStatus.COMPLETED:
+            self._log.info(
+                "step %s completed (tokens=%d, %dms)",
+                result.step_id,
+                result.tokens_used,
+                result.execution_time_ms,
+            )
+        else:
+            self._log.error(
+                "step %s failed: %s", result.step_id, result.output.get("error", "unknown")
+            )
+
     def record_result(self, step: ExecutionStep, result: AgentResult) -> None:
         """Store a finished step's result and update trace, status, and totals."""
         status = StepStatus.COMPLETED if result.status == "completed" else StepStatus.FAILED
@@ -179,20 +217,28 @@ class RunMonitor:
         self.total_tokens += result.tokens_used
         self.total_cost_usd += result.actual_cost_usd or 0.0
         self.trace.append(self._entry(step, result, status))
+        self._log_result(result, status)
         self._touch()
 
     def mark_skipped(self, step_ids: set[str]) -> None:
         """Mark still-pending steps in ``step_ids`` as skipped."""
-        for step_id in step_ids:
-            if self.step_status.get(step_id) == StepStatus.PENDING:
-                self.step_status[step_id] = StepStatus.SKIPPED
+        skipped = [s for s in step_ids if self.step_status.get(s) == StepStatus.PENDING]
+        for step_id in skipped:
+            self.step_status[step_id] = StepStatus.SKIPPED
+        if skipped:
+            self._log.warning("skipped %d step(s): %s", len(skipped), ", ".join(sorted(skipped)))
         self._touch()
 
     def mark_cancelled(self, step_ids: set[str]) -> None:
         """Mark pending or running steps in ``step_ids`` as cancelled."""
-        for step_id in step_ids:
-            if self.step_status.get(step_id) in {StepStatus.PENDING, StepStatus.RUNNING}:
-                self.step_status[step_id] = StepStatus.CANCELLED
+        cancellable = {StepStatus.PENDING, StepStatus.RUNNING}
+        cancelled = [s for s in step_ids if self.step_status.get(s) in cancellable]
+        for step_id in cancelled:
+            self.step_status[step_id] = StepStatus.CANCELLED
+        if cancelled:
+            self._log.warning(
+                "cancelled %d step(s): %s", len(cancelled), ", ".join(sorted(cancelled))
+            )
         self._touch()
 
     def request_replan(self, failed_id: str, error: str) -> None:
@@ -200,6 +246,7 @@ class RunMonitor:
         self.failed_step_id = failed_id
         self.failure_error = error
         self._replan.set()
+        self._log.warning("structural failure at %s -> re-plan requested: %s", failed_id, error)
         self._touch()
 
     def clear_replan(self) -> None:
@@ -211,6 +258,7 @@ class RunMonitor:
     def request_cancel(self) -> None:
         """Raise the cooperative cancel event."""
         self._cancel.set()
+        self._log.info("cancellation requested")
         self._touch()
 
     @property

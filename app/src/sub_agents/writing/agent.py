@@ -14,9 +14,9 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.src.general_utils.agent_base import AgentResult
 from app.src.general_utils.llm import build_chat_model
 from app.src.schemas import get_config
-from app.src.general_utils.agent_base import AgentResult
 from app.src.sub_agents.writing import nodes
 from app.src.sub_agents.writing.routing import route_after_judge
 from app.src.sub_agents.writing.schemas import WritingInput, WritingState

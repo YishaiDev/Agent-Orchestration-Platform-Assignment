@@ -7,7 +7,8 @@ all state lives in the request/response models below.
 
 from __future__ import annotations
 
-from typing import Literal
+import operator
+from typing import Annotated, Literal, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -61,3 +62,29 @@ class CodeVerdict(BaseModel):
     issues: list[str] = Field(
         default_factory=list, description="Concrete problems the generator must fix when revising."
     )
+
+
+class CodeState(TypedDict):
+    """LangGraph state for the generate -> judge -> (refine) reflection loop.
+
+    Counters (``tokens_used``, ``cost``, ``rounds``) use additive reducers so each node returns only
+    its delta. ``problem`` is the open quality signal (``None`` once the code is accepted) and
+    ``has_parser`` selects the Tier-1 deterministic parser gate vs the Tier-2 LLM critic.
+    """
+
+    action: Action
+    input: str
+    language: str
+    context: str
+    has_parser: bool
+    max_rounds: int
+    content: str
+    code: str
+    out_language: str
+    tokens_used: Annotated[int, operator.add]
+    cost: Annotated[float, operator.add]
+    rounds: Annotated[int, operator.add]
+    problem: str | None
+    issues: list[str]
+    parses: bool | None
+    validation_error: str

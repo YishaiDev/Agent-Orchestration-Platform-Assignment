@@ -37,7 +37,7 @@ state (`parses: false` + `validation_error`). Downstream consumers decide what t
 
 Used **only for languages with no registered parser** (e.g. Ruby, Go-without-grammar) — the only
 signal available where a parser can't reach. A cheaper, **independent** reviewer model
-(`review_model_id`, default `gemini-2.5-flash-lite`, temperature 0) reads the code and returns a
+(`review_model_id`, default `gemini-2.5-flash`, temperature 0) reads the code and returns a
 `CodeVerdict{verdict: revise|return, issues}`. `revise` recalls the generator with the concrete
 issues; `return` accepts. Bounded by `max_review_retries` (default 1). Independence (different model,
 temp 0) avoids the self-approval bias of a model grading its own output. Parser-backed languages

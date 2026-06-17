@@ -248,8 +248,8 @@ def test_actual_cost_uses_generator_then_reviewer_price() -> None:
     model = FakeModel([_out(code=_BROKEN_PY), _out(code=_VALID_PY)], in_tok=4, out_tok=1)
     result = _run(model, language="python")
     pricing = get_config().pricing
-    gen = token_cost(pricing["gemini-2.5-flash"], 4, 1)  # initial generation
-    refine = token_cost(pricing["gemini-2.5-flash-lite"], 4, 1)  # refine on the reviewer model
+    gen = token_cost(pricing["gemini-3.5-flash"], 4, 1)  # initial generation
+    refine = token_cost(pricing["gemini-2.5-flash"], 4, 1)  # refine on the reviewer model
     assert result.actual_cost_usd == round(gen + refine, 6)
     assert result.tokens_used == 2 * 5
 

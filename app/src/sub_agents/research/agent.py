@@ -16,22 +16,22 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langgraph.graph.state import CompiledStateGraph
 
+from app.src.general_utils.agent_base import AgentResult, extract_tokens
 from app.src.general_utils.cost import estimate_cost, token_cost
 from app.src.general_utils.llm import build_chat_model
-from app.src.schemas.config import ModelPrice, ResearchAgentConfig, get_config
-from app.src.services.tavily_client import TavilySearch
-from app.src.general_utils.agent_base import AgentResult, extract_tokens
 from app.src.general_utils.middleware import (
     build_compaction_middleware,
     build_token_cost_middleware,
 )
+from app.src.general_utils.tokens import count_prompt_tokens
+from app.src.general_utils.tools import think
+from app.src.schemas.config import ModelPrice, ResearchAgentConfig, get_config
+from app.src.services.tavily_client import TavilySearch
 from app.src.sub_agents.research import prompts
 from app.src.sub_agents.research.schemas import ResearchContext, ResearchSummary, SearchFn
 from app.src.sub_agents.research.tools import web_search
 
 AGENT_NAME = "research"
-_AVG_INPUT_TOKENS = 900
-_AVG_OUTPUT_TOKENS = 350
 _LOW_CONFIDENCE_CAP = 0.3
 
 
@@ -56,7 +56,7 @@ def build_research_agent(
     ]
     return create_agent(
         model=model,
-        tools=[web_search],
+        tools=[web_search, think],
         system_prompt=prompts.RESEARCH_SYSTEM,
         middleware=middleware,
         context_schema=ResearchContext,
@@ -171,15 +171,17 @@ async def run_research_agent(
         price = app_cfg.pricing[cfg.model_id]
         ctx = _build_context(subtopic, step_id, session_id, searcher, cfg)
         agent = build_research_agent(model, summarizer, cfg, price)
+        initial = prompts.initial_messages(subtopic)
         final = await agent.ainvoke(
-            {"messages": prompts.initial_messages(subtopic)},
+            {"messages": initial},
             context=ctx,  # type: ignore[call-overload]
         )
         findings = _transcript(final["messages"])
         summary, summary_tokens, summary_cost = await _summarize(
             summarizer, subtopic, findings, ctx.collected_sources, price
         )
-        est = estimate_cost(price, cfg.max_search_calls + 2, _AVG_INPUT_TOKENS, _AVG_OUTPUT_TOKENS)
+        input_tokens = count_prompt_tokens(initial, app_cfg.estimation.chars_per_token)
+        est = estimate_cost(price, cfg.max_search_calls + 2, input_tokens, cfg.avg_output_tokens)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         return _assemble_result(summary, ctx, summary_tokens, summary_cost, est, elapsed_ms)
     except Exception as exc:

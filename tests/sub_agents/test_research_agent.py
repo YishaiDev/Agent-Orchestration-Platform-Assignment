@@ -127,8 +127,8 @@ class CountingSearcher:
 
 def _cfg(**overrides: object) -> ResearchAgentConfig:
     base = dict(
-        model_id="gemini-2.5-flash",
-        summarizer_model_id="gemini-2.5-flash-lite",
+        model_id="gemini-3.5-flash",
+        summarizer_model_id="gemini-2.5-flash",
         max_search_calls=5,
         recursion_limit=12,
         search_top_k=5,
@@ -229,7 +229,7 @@ def test_tavily_key_and_runtime_absent_from_tool_schema() -> None:
 
 def test_actual_cost_matches_price_table() -> None:
     result = asyncio.run(_run_full(step_id="step-cost"))
-    main = get_config().pricing["gemini-2.5-flash"]
+    main = get_config().pricing["gemini-3.5-flash"]
     expected = token_cost(main, 400, 100) + token_cost(main, 100, 40)
     assert result.actual_cost_usd == round(expected, 6)
     assert result.tokens_used == 500 + 140

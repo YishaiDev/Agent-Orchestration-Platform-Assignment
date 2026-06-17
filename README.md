@@ -117,6 +117,17 @@ curl http://localhost:8000/tasks/<id>/result
 curl -X POST http://localhost:8000/tasks/<id>/cancel
 ```
 
+`constraints` and `output_format` are optional. The body accepts the assignment's full **Task
+Format** — `constraints` may be a JSON object (normalized to planner text) or a plain string:
+
+```bash
+curl -X POST http://localhost:8000/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"goal": "Write a comparison blog post about Python vs JavaScript for beginners",
+       "constraints": {"max_words": 1500, "tone": "friendly", "include_code_examples": true},
+       "output_format": "markdown"}'
+```
+
 Tasks complete in a steady stream rather than instantly: concurrency is capped at `3` to respect the
 Gemini free tier's 5 requests/minute.
 

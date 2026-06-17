@@ -15,7 +15,8 @@ def build_chat_model(
         model_id: Gemini model id (e.g. ``gemini-2.5-flash``).
         temperature: Sampling temperature.
         api_key: Google Generative AI API key.
-        max_retries: Provider-level retries with backoff on transient errors (e.g. 429).
+        max_retries: Provider-level retries with exponential backoff on transient errors
+            (e.g. 429 rate limits and 503 UNAVAILABLE "high demand" spikes).
 
     Returns:
         An initialized chat model ready for ``with_structured_output``.

@@ -23,14 +23,14 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("GOOGLE_API_KEY", "test-key")
 
 from app.src.general_utils.cost import token_cost  # noqa: E402
-from app.src.schemas.config import AnalysisAgentConfig, ModelPrice  # noqa: E402
+from app.src.schemas.config import AnalysisAgentConfig, ModelPrice, get_config  # noqa: E402
 from app.src.sub_agents.analysis import prompts  # noqa: E402
 from app.src.sub_agents.analysis.agent import (  # noqa: E402
     build_analysis_agent,
     run_analysis_agent,
 )
 from app.src.sub_agents.analysis.schemas import AnalysisContext, AnalysisSummary  # noqa: E402
-from app.src.general_utils.tools import compute  # noqa: E402
+from app.src.sub_agents.analysis.tools import compute  # noqa: E402
 from langchain_core.language_models.fake_chat_models import (  # noqa: E402
     FakeMessagesListChatModel,
 )
@@ -131,8 +131,8 @@ class FakeSummarizer(FakeMessagesListChatModel):
 
 def _cfg(**overrides: object) -> AnalysisAgentConfig:
     base: dict = dict(
-        model_id="gemini-2.5-flash",
-        summarizer_model_id="gemini-2.5-flash-lite",
+        model_id="gemini-3.5-flash",
+        summarizer_model_id="gemini-2.5-flash",
         recursion_limit=10,
         max_compute_calls=6,
         confidence_threshold=0.5,
@@ -258,7 +258,8 @@ def test_result_matches_spec_output_format() -> None:
     assert set(payload["output"]) == {"content", "findings", "confidence", "sources"}
     assert payload["output"]["sources"] == ["upstream://research/1"]
     assert isinstance(payload["output"]["findings"], list)
-    expected = token_cost(_MAIN_PRICE, 200, 50) * 2 + token_cost(_MAIN_PRICE, 100, 40)
+    main_price = get_config().pricing["gemini-3.5-flash"]
+    expected = token_cost(main_price, 200, 50) * 2 + token_cost(main_price, 100, 40)
     assert payload["actual_cost_usd"] == round(expected, 6)
 
 

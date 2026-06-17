@@ -4,9 +4,9 @@
 
 - **Claude Code (Opus 4.8)** — primary pair-programming agent for design, implementation,
   test-harness authoring, refactoring, and keeping `DECISIONS.md` in sync.
-- **Google Gemini** (`gemini-2.5-flash` + `gemini-2.5-flash-lite` via LangChain
-  `init_chat_model`, `model_provider="google_genai"`) — the LLM the platform itself runs on,
-  and the judge model in the eval harness.
+- **Google Gemini** (`gemini-3.5-flash` for the planner, synthesizer, and the four agents;
+  `gemini-2.5-flash` as the cheaper, independent reviewer / summarizer / judge tier — both via
+  LangChain `init_chat_model`, `model_provider="google_genai"`) — the LLMs the platform runs on.
 - **Tavily** — the grounded web-search backend for the Research Agent.
 - **Claude Code `agent-building` skill** — the architecture reference (complexity ladder, pattern
   catalog: Plan-and-Execute, evaluator-optimizer, scatter-gather) I used to ground the
@@ -43,21 +43,22 @@
   design was locked (below), AI carried it through schema → judge module → prompts → node split → graph
   edges → config → tests as one coherent change, kept every function under the 20-line house rule,
   reused `merge_replan`/`invoke_structured`/the `repair_message` shape instead of cloning them, and ran
-  the full suite green (107 tests) plus Ruff clean. The repetitive, error-prone wiring is exactly where
+  the full suite green (112 tests) plus Ruff clean. The repetitive, error-prone wiring is exactly where
   it earns its keep once *I* own the design.
 
 ## What I Had to Fix
 
-- **Speculative model IDs in the original plan.** The first research-agent plan named
-  `gemini-3.5-flash` / `gemini-3.1-flash-lite` with invented pricing. Those IDs don't exist for
-  this project — I corrected the config to the real `gemini-2.5-flash` / `gemini-2.5-flash-lite`
-  and their actual prices before anything ran. The same phantom `gemini-3.5-flash` came back to
-  bite at submission time: a blanket `git add -A` nearly folded an unfinished `gemini-3.5-flash`
-  migration (the bumped config plus its matched pricing test) into the tagged commit. It was
-  catchable only because the **pricing table** ships exactly two IDs (`gemini-2.5-flash` /
-  `-flash-lite`) — the bumped models had no price, so cost accounting would have crashed on the
-  first live task. I reverted the whole trio (`config.yaml` + `config.py` + test) to the validated
-  baseline before tagging `v1`, and re-confirmed all 107 offline tests green.
+- **AI invented model IDs *and their prices*.** The first research-agent plan named
+  `gemini-3.5-flash` / `gemini-3.1-flash-lite` with **fabricated** per-token pricing — confident,
+  specific, and wrong. I refused to trust AI-supplied cost numbers and made the **pricing table the
+  single gate**: every model id the platform uses must carry a verified price row, or cost accounting
+  fails fast instead of silently billing nonsense. That discipline earned its keep when I later
+  migrated the platform to `gemini-3.5-flash` (with `gemini-2.5-flash` as the cheaper independent
+  reviewer/summarizer tier): the gate immediately surfaced a **half-applied migration** — a cost test
+  and two config defaults still naming the retired `gemini-2.5-flash-lite` — which I finished so every
+  shipped id has a real price and the full offline suite goes green. A blanket `git add -A` had also
+  nearly folded that migration in mid-flight; I now **stage explicitly** and re-confirm the suite
+  before tagging, rather than trusting a catch-all add.
 - **Initial misread of the 429 error.** AI first treated the eval's `RESOURCE_EXHAUSTED` as a
   transient rate-limit and added `max_retries`/backoff. The retries were a good resilience fix,
   but the root cause was a **per-model per-day** free-tier cap (20/day for `gemini-2.5-flash`) —
@@ -96,6 +97,21 @@
   languages never invoke the critic) and moved it to a **cheaper, independent reviewer model at
   temperature 0**. I also collapsed two near-duplicate correction loops it had written into one
   generic loop parameterized by signal + refine functions.
+- **A flat per-agent cost constant masqueraded as a real estimate.** Each agent's pre-run
+  `est_cost_usd` multiplied a hardcoded `_AVG_INPUT_TOKENS` (e.g. analysis = 1100) by the call
+  count, so a one-line goal and a goal carrying 6 KB of upstream context produced the *same* number.
+  I asked *"is there a better way to estimate the cost?"* and had the AI check the web and the
+  `agent-building` cost-optimization reference rather than just retune the constant. Its first
+  concrete proposal — call Gemini's `get_num_tokens_from_messages` for an exact count — looked right
+  until I wired it against the constraints: it is a **synchronous network call**, and the agents are
+  `async`, so it would block the scheduler's concurrency and would crash the offline test doubles
+  (which have no such method), all to add precision to a number that is only ever an estimate. We
+  landed on a deterministic character-ratio over the **real assembled prompt**
+  (`general_utils/tokens.py::count_prompt_tokens`), with `chars_per_token` and per-agent
+  `avg_output_tokens` lifted into `config.yaml`, and left exact accounting where it belongs — the
+  post-run measured `actual_cost`. (I also made the AI justify the `4.0` default it kept in the
+  helper — it's the canonical ~4-chars-per-token rule of thumb, used only when no config value is
+  passed.)
 - **AI reached for repo-root CI; the spec forbade it.** To prove the Docker image built, the AI
   added a `.github/workflows/` GitHub Actions pipeline at the repo root. But the assignment fixes
   the submission tree (`README` / `AI_USAGE` / `DECISIONS` / `docker-compose.yml` / `Dockerfile` /
@@ -108,6 +124,19 @@
   (`src/`, `main.py`, `cli.py`, `config.yaml`, `evals/`) — a clean tree *and* a secret-free,
   unbroken image from one change, with `.git/info/exclude` preserving the gitignore protection
   invisibly.
+- **A green test suite hid two spec-conformance defects until I validated against the PDF itself.**
+  All 112 offline tests passed, but I distrusted "green" as proof of *spec* conformance and ran the
+  app against the assignment's literal **Task Format** and **API** examples. Two real defects surfaced
+  that no test exercised: (1) the documented body — `constraints` as a JSON object plus `output_format`
+  — was **rejected with 422**, because the request model accepted only free-text constraints and never
+  surfaced `output_format` (the engine threaded it end-to-end; only the HTTP layer was unwired). I made
+  `api/models.py::TaskRequest` accept the object **or** string form and expose `output_format`,
+  backward-compatibly. (2) The documented local run, `cd app && uv run python main.py`, died with
+  `ModuleNotFoundError: No module named 'app'` — the AI-built entry point only worked because the
+  *container* sets `PYTHONPATH=/workspace`; nothing put the repo root on `sys.path` for a local run. I
+  fixed `main.py` to mirror the test files' path-insertion. Both are exactly the kind of gap a passing
+  suite cannot see — the tests drive the engine with fakes; they never POST the spec's own JSON or boot
+  the documented command.
 
 ## What AI Struggled With
 

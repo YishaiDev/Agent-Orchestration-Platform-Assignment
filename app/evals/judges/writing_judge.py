@@ -268,7 +268,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=str, default=str(DATASET_PATH), help="Dataset YAML path")
     parser.add_argument(
         "--model", type=str, default=None,
-        help="Override writer+judge model id (e.g. gemini-2.5-flash-lite) for this run"
+        help="Override writer+judge model id (e.g. gemini-2.5-flash) for this run"
     )
     return parser.parse_args()
 

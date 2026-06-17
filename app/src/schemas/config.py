@@ -39,6 +39,7 @@ class ResearchAgentConfig(BaseModel):
     keep_recent: int = 6
     llm_cache: str = "memory"
     tavily_ttl_seconds: int = 3600
+    avg_output_tokens: int = 350
 
 
 class AnalysisAgentConfig(BaseModel):
@@ -53,6 +54,7 @@ class AnalysisAgentConfig(BaseModel):
     confidence_threshold: float = 0.5
     trigger_messages: int = 16
     keep_recent: int = 6
+    avg_output_tokens: int = 400
 
 
 class CodeAgentConfig(BaseModel):
@@ -62,9 +64,10 @@ class CodeAgentConfig(BaseModel):
     temperature: float = 0.2
     default_language: str = "python"
     max_syntax_retries: int = 4
-    review_model_id: str = "gemini-2.5-flash-lite"
+    review_model_id: str = "gemini-2.5-flash"
     review_temperature: float = 0.0
     max_review_retries: int = 1
+    avg_output_tokens: int = 450
 
 
 class OrchestratorConfig(BaseModel):
@@ -87,6 +90,12 @@ class OrchestratorConfig(BaseModel):
     context_char_budget: int = 6000
 
 
+class EstimationConfig(BaseModel):
+    """Runtime parameters for pre-execution cost estimation."""
+
+    chars_per_token: float = 4.0
+
+
 class ModelPrice(BaseModel):
     """USD price per 1M tokens for one model id."""
 
@@ -104,6 +113,7 @@ class AppConfig(BaseSettings):
     analysis_agent: AnalysisAgentConfig
     code_agent: CodeAgentConfig
     orchestrator: OrchestratorConfig
+    estimation: EstimationConfig = Field(default_factory=EstimationConfig)
     pricing: dict[str, ModelPrice] = Field(default_factory=dict)
 
     model_config = SettingsConfigDict(
@@ -168,6 +178,7 @@ def _map_research_agent(block: dict[str, Any]) -> ResearchAgentConfig:
         keep_recent=summarization.get("keep_recent", 6),
         llm_cache=caching.get("llm_cache", "memory"),
         tavily_ttl_seconds=caching.get("tavily_ttl_seconds", 3600),
+        avg_output_tokens=block.get("avg_output_tokens", 350),
     )
 
 
@@ -193,6 +204,7 @@ def _map_analysis_agent(block: dict[str, Any]) -> AnalysisAgentConfig:
         confidence_threshold=block.get("confidence_threshold", 0.5),
         trigger_messages=summarization.get("trigger_messages", 16),
         keep_recent=summarization.get("keep_recent", 6),
+        avg_output_tokens=block.get("avg_output_tokens", 400),
     )
 
 
@@ -212,9 +224,10 @@ def _map_code_agent(block: dict[str, Any]) -> CodeAgentConfig:
         temperature=model.get("temperature", 0.2),
         default_language=block.get("default_language", "python"),
         max_syntax_retries=block.get("max_syntax_retries", 4),
-        review_model_id=review.get("id", "gemini-2.5-flash-lite"),
+        review_model_id=review.get("id", "gemini-2.5-flash"),
         review_temperature=review.get("temperature", 0.0),
         max_review_retries=block.get("max_review_retries", 1),
+        avg_output_tokens=block.get("avg_output_tokens", 450),
     )
 
 
@@ -251,6 +264,18 @@ def _map_orchestrator(block: dict[str, Any]) -> OrchestratorConfig:
     )
 
 
+def _map_estimation(block: dict[str, Any]) -> EstimationConfig:
+    """Flatten the ``estimation`` YAML block into its config model.
+
+    Args:
+        block: The ``estimation`` mapping from YAML.
+
+    Returns:
+        A populated EstimationConfig (defaults applied when keys are absent).
+    """
+    return EstimationConfig(chars_per_token=block.get("chars_per_token", 4.0))
+
+
 def _map_pricing(block: dict[str, Any]) -> dict[str, ModelPrice]:
     """Map the ``pricing`` YAML block into per-model price models."""
     return {model_id: ModelPrice(**prices) for model_id, prices in block.items()}
@@ -270,5 +295,6 @@ def get_config() -> AppConfig:
         analysis_agent=_map_analysis_agent(raw.get("analysis_agent", {})),
         code_agent=_map_code_agent(raw.get("code_agent", {})),
         orchestrator=_map_orchestrator(raw.get("orchestrator", {})),
+        estimation=_map_estimation(raw.get("estimation", {})),
         pricing=_map_pricing(raw.get("pricing", {})),
     )

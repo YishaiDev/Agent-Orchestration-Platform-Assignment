@@ -1,15 +1,23 @@
 """Entry point: start the orchestration HTTP API with uvicorn.
 
-Run with ``uv run python app/main.py``. Host/port are env-overridable (``HOST`` / ``PORT``) so the
-container and local runs share one entry point.
+Run from the ``app`` directory with ``uv run python main.py``. Host/port are env-overridable
+(``HOST`` / ``PORT``) so the container and local runs share one entry point. The repo root is put on
+``sys.path`` so the ``app`` package imports identically whether or not ``PYTHONPATH`` is set (the
+container sets it; a local ``uv run`` does not).
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import sys
+from pathlib import Path
 
 import uvicorn
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("orchestration.api")

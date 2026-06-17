@@ -10,6 +10,8 @@ from app.src.general_utils.agent_base import Messages
 
 RESEARCH_SYSTEM = (
     "You are a research agent. Investigate the user's subtopic by calling the web_search tool. "
+    "Use the 'think' tool (a private scratchpad the user cannot see) to plan your searches, weigh "
+    "what is still missing, and decide when coverage is sufficient. "
     "You decide how many searches to run: keep searching while it materially improves coverage, "
     "and stop once you can answer confidently. When the tool reports the search budget is reached, "
     "stop searching immediately and rely on what you have. Ground every claim in the returned "

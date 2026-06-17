@@ -1,0 +1,78 @@
+## Cost-estimation eval dataset
+## Verifies the pre-execution est_cost_usd now tracks the REAL assembled prompt size
+## (general_utils/tokens.py::count_prompt_tokens) instead of a flat per-agent constant.
+##
+## Each agent has a `small` and a `large` scenario. The eval asserts (deterministically, no LLM):
+##   M1 populated   — every estimate is > 0
+##   M2 scales      — within an agent, the large-prompt estimate > the small-prompt estimate
+##   M3 sensitive   — doubling chars_per_token lowers the token estimate (heuristic honors config)
+
+examples:
+
+  - id: RES-S
+    agent: research
+    size: small
+    payload:
+      subtopic: "What is a mutex?"
+
+  - id: RES-L
+    agent: research
+    size: large
+    payload:
+      subtopic: >
+        Compare the concurrency models of CPython's GIL, the experimental free-threaded build,
+        asyncio's event loop, multiprocessing, and subinterpreters, covering the trade-offs each
+        makes for CPU-bound versus I/O-bound workloads, the migration cost of each approach, and
+        the observability implications for a production service that must stay within a fixed token
+        and latency budget across many parallel requests.
+
+  - id: ANA-S
+    agent: analysis
+    size: small
+    payload:
+      instruction: "Summarize the trend."
+      action: analyze
+      data:
+        - { month: "Jan", revenue: 100 }
+
+  - id: ANA-L
+    agent: analysis
+    size: large
+    payload:
+      instruction: >
+        Identify the strongest growth drivers, flag any anomalous months, quantify the
+        month-over-month variance, and call out which segments most influenced the overall trend.
+      action: identify_patterns
+      data:
+        - { month: "Jan", revenue: 100, segment: "smb", region: "emea", churn: 0.04 }
+        - { month: "Feb", revenue: 132, segment: "smb", region: "emea", churn: 0.05 }
+        - { month: "Mar", revenue: 121, segment: "ent", region: "amer", churn: 0.02 }
+        - { month: "Apr", revenue: 188, segment: "ent", region: "amer", churn: 0.03 }
+        - { month: "May", revenue: 205, segment: "ent", region: "apac", churn: 0.06 }
+        - { month: "Jun", revenue: 264, segment: "smb", region: "apac", churn: 0.01 }
+        - { month: "Jul", revenue: 240, segment: "ent", region: "emea", churn: 0.07 }
+        - { month: "Aug", revenue: 312, segment: "smb", region: "amer", churn: 0.02 }
+
+  - id: COD-S
+    agent: code
+    size: small
+    payload:
+      action: generate
+      language: python
+      input: "Write a function that adds two numbers."
+      context: ""
+
+  - id: COD-L
+    agent: code
+    size: large
+    payload:
+      action: generate
+      language: python
+      input: >
+        Implement a thread-safe in-memory LRU cache class with get/put, a configurable capacity,
+        per-entry TTL expiry, hit/miss counters exposed via a stats() method, and full Google-style
+        docstrings and type hints on every method.
+      context: >
+        The cache will back a hot read path in an async web service. Existing code already defines a
+        Clock protocol with a now() -> float method that must be injected for testability, and a
+        CacheStats dataclass with hits:int, misses:int, evictions:int that stats() must return.
