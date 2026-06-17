@@ -1,0 +1,63 @@
+# End-to-end orchestration eval — scenario registry.
+#
+# Each case drives the full LangGraph outer loop (plan -> execute -> evaluate -> synthesize ->
+# judge) via ``run_task`` with scripted models + a timing-aware fake step runner, so the whole
+# platform is exercised offline and deterministically (no network, no Gemini quota). The executable
+# scripted-model / fake-runner construction for each id lives in ``evals/judges/orchestration_eval.py``
+# (scripted LLM turns and fail-sets are code, not data); this file is the reviewable "what we check
+# and which DECISIONS.md claim it verifies" registry that titles the report.
+
+- id: O-01
+  title: Sequential dependency chain
+  claim: "DECISIONS §1/§2 — dependency edges are the source of truth for execution order"
+  scenario: "s1 (research) -> s2 (analysis, depends on s1). Verifies the dependent never starts before its upstream completes."
+  asserts:
+    - "final status == completed"
+    - "both steps completed (2/2)"
+    - "s1 ran strictly before s2"
+
+- id: O-02
+  title: Parallel execution is genuinely concurrent
+  claim: "DECISIONS §3 — continuous ready-set scheduler, real overlap, not sequential async"
+  scenario: "Three independent steps, each a 150ms awaited runner, concurrency=3. Wall-clock must be far below the 450ms serial sum."
+  asserts:
+    - "final status == completed"
+    - "all three steps completed (3/3)"
+    - "wall-clock < 300ms (overlap, not serial)"
+
+- id: O-03
+  title: Skip-and-continue on an independent-branch failure
+  claim: "DECISIONS §3/§4 rung 2-3 — a failed step skips only its dependents; independent branches survive; partial result"
+  scenario: "Two independent branches a->a2 and b. Step 'a' fails; 'a2' is skipped; 'b' completes. No task-wide abort."
+  asserts:
+    - "final status == completed (partial)"
+    - "a in failed_steps"
+    - "a2 in skipped_steps"
+    - "b completed"
+
+- id: O-04
+  title: Structural failure triggers a bounded re-plan and recovers
+  claim: "DECISIONS §4 rung 5 — structural failure consults the re-plan decider; merge freezes done work and namespaces new ids"
+  scenario: "Single required step s1 fails -> structural -> decider returns replan with a fresh step -> recovery step runs and completes."
+  asserts:
+    - "replans == 1"
+    - "final status == completed"
+    - "namespaced recovery step (r1_*) ran"
+
+- id: O-05
+  title: Bounded re-plan budget gives up to a failed task
+  claim: "DECISIONS §4 — re-plan is capped by max_replans; exhausting it fails cleanly with the failed list"
+  scenario: "Single required step s1 fails with max_replans=0 -> no decider call -> task fails with s1 recorded."
+  asserts:
+    - "replans == 0"
+    - "final status == failed"
+    - "s1 in failed_steps"
+
+- id: O-06
+  title: Post-synthesis judge re-synthesizes then accepts
+  claim: "DECISIONS §4 — synthesis quality judge can loop (resynthesize) within max_resynth before accepting"
+  scenario: "Judge returns resynthesize once (feedback), then accept. The second draft ships."
+  asserts:
+    - "resynth_rounds == 1"
+    - "final status == completed"
+    - "final output is the second (corrected) draft"

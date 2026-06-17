@@ -1,0 +1,101 @@
+# Synthesis-judge eval dataset.
+# Each example is a hand-built synthesis scenario with a KNOWN-CORRECT expected verdict, so the eval
+# is label-based: it compares the live judge's verdict to the ground-truth label (no second LLM).
+# Fields: id, category, goal, output_format (optional), steps[] (id/agent/action), outputs[]
+# (step_id/content/confidence/sources), draft (content/confidence), expected_verdict, notes.
+examples:
+  - id: SY-01
+    category: accept-grounded
+    goal: "Summarize the key advantages of Python for data science beginners."
+    steps:
+      - { id: s1, agent: research, action: research }
+      - { id: s2, agent: analysis, action: analyze, dependencies: [s1] }
+    outputs:
+      - step_id: s1
+        content: "Python has a gentle syntax and a large data-science ecosystem (pandas, NumPy, scikit-learn). It is the most widely taught first language for analytics."
+        confidence: 0.9
+        sources: ["python.org", "realpython.com"]
+      - step_id: s2
+        content: "Across the findings, the recurring advantage is the mature library ecosystem plus readable syntax, which lowers the barrier for beginners."
+        confidence: 0.85
+        sources: []
+    draft:
+      content: "Python is a strong first choice for data-science beginners: its readable syntax lowers the learning curve, and its mature ecosystem (pandas, NumPy, scikit-learn) covers most analytics needs. These two factors together make it the most commonly taught analytics language."
+      confidence: 0.88
+    expected_verdict: accept
+    notes: "Every claim is supported by the outputs and the goal is fully addressed."
+
+  - id: SY-02
+    category: resynthesize-hallucination
+    goal: "Report what the research found about Python's performance characteristics."
+    steps:
+      - { id: s1, agent: research, action: research }
+    outputs:
+      - step_id: s1
+        content: "Python is an interpreted language; CPU-bound code is slower than compiled languages, but C-extensions (NumPy) and PyPy mitigate this for numeric workloads."
+        confidence: 0.8
+        sources: ["docs.python.org"]
+    draft:
+      content: "The research shows Python is interpreted and slower for CPU-bound work, mitigated by C-extensions. It also benchmarks 3.4x faster than Java on the TechEmpower suite and is used by 92% of Fortune 500 firms."
+      confidence: 0.9
+    expected_verdict: resynthesize
+    notes: "The benchmark and Fortune-500 figures appear in no output — fabricated claims. Data is otherwise sufficient, so the cheap fix is to re-synthesize without the unsupported numbers."
+
+  - id: SY-03
+    category: resynthesize-format
+    goal: "List three benefits of code review."
+    output_format: json
+    steps:
+      - { id: s1, agent: analysis, action: analyze }
+    outputs:
+      - step_id: s1
+        content: "Code review catches defects early, spreads knowledge across the team, and enforces consistent style and standards."
+        confidence: 0.9
+        sources: []
+    draft:
+      content: "Code review provides three benefits: it catches defects early, it spreads knowledge across the team, and it enforces consistent style."
+      confidence: 0.85
+    expected_verdict: resynthesize
+    notes: "Output format requested JSON but the draft is prose — deterministic format check fires; data is sufficient, so re-synthesize in the right shape."
+
+  - id: SY-04
+    category: replan-coverage-gap
+    goal: "Compare Python and JavaScript for beginners, with a working code example in EACH language."
+    steps:
+      - { id: s1, agent: research, action: research }
+      - { id: s2, agent: analysis, action: analyze, dependencies: [s1] }
+    outputs:
+      - step_id: s1
+        content: "Python: readable syntax, strong in data science. JavaScript: runs in the browser, essential for web front-ends."
+        confidence: 0.85
+        sources: ["mdn.dev", "python.org"]
+      - step_id: s2
+        content: "For a beginner, Python wins on readability; JavaScript wins on immediate visual feedback in the browser. Choice depends on the target domain."
+        confidence: 0.8
+        sources: []
+    draft:
+      content: "Python suits beginners who want readable syntax and data-science paths; JavaScript suits those who want to build for the browser with instant feedback. The right choice depends on the target domain. (No runnable code examples were available.)"
+      confidence: 0.6
+    expected_verdict: replan
+    notes: "The goal explicitly requires a code example in each language, but no code-agent step ran and no code is in the outputs — a genuine coverage gap that re-synthesis cannot fill. Needs a new code step."
+
+  - id: SY-05
+    category: accept-conflict-resolution
+    goal: "State whether remote work increases or decreases team productivity, per the findings."
+    steps:
+      - { id: s1, agent: research, action: research }
+      - { id: s2, agent: research, action: research }
+    outputs:
+      - step_id: s1
+        content: "A 2023 Stanford study found fully-remote work cut productivity ~10% versus in-office for the studied call-center roles."
+        confidence: 0.7
+        sources: ["stanford.edu"]
+      - step_id: s2
+        content: "A large hybrid-work survey reported a slight productivity increase and higher retention under a 2-3 day hybrid schedule."
+        confidence: 0.85
+        sources: ["nber.org", "hbr.org"]
+    draft:
+      content: "The findings disagree by arrangement: one study links fully-remote work to a ~10% productivity drop in call-center roles (lower confidence), while a higher-confidence survey finds hybrid (2-3 days) slightly increases productivity and retention. Net: hybrid schedules look productivity-positive, fully-remote may not be, so the answer depends on the arrangement."
+      confidence: 0.75
+    expected_verdict: accept
+    notes: "Sources conflict; the draft correctly reconciles by preferring the higher-confidence source and noting the disagreement rather than concatenating — exactly the synthesizer's mandate."

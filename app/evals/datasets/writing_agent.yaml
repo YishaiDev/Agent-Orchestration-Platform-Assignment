@@ -1,0 +1,75 @@
+## Writing Agent — eval dataset
+## Each entry: id, category, instruction, source_material, constraints, output_format, expected_output
+## The judge scores the agent's actual content + observability signals against expected_output.
+
+examples:
+
+  - id: W-01
+    category: Generate
+    instruction: "Write a short welcome message for a developer onboarding guide."
+    source_material: ""
+    constraints:
+      tone: friendly
+      max_words: 120
+    output_format: markdown
+    expected_output: >
+      A friendly, welcoming onboarding message under ~120 words, rendered as valid markdown
+      (e.g. a heading and/or short paragraph). Non-empty, coherent, no leftover instructions
+      or fence tags.
+
+  - id: W-02
+    category: Edit-and-improve
+    instruction: "Improve this rough note into clear, professional prose. Fix grammar and flow."
+    source_material: >
+      we was thinking that the new api maybe is faster but not sure, it dependz on the cache
+      and stuff. anyway pls use it for the dashbord becuase old one slow.
+    constraints:
+      tone: professional
+      max_words: 150
+    output_format: markdown
+    expected_output: >
+      A grammatically correct, professionally-worded rewrite that preserves the original meaning
+      (new API may be faster depending on caching; recommend using it for the dashboard because
+      the old one is slow). Markdown, under ~150 words, clearly improved over the input.
+
+  - id: W-03
+    category: Format-output
+    instruction: "Present these three Python tips as a clean ordered list with a short intro."
+    source_material: >
+      Tip: use list comprehensions for simple transforms. Tip: prefer pathlib over os.path.
+      Tip: use f-strings for formatting.
+    constraints:
+      tone: friendly
+      max_words: 200
+    output_format: markdown
+    expected_output: >
+      Valid markdown containing a short intro line followed by an ordered (numbered) list with
+      all three tips. Faithful to the source tips, under ~200 words.
+
+  - id: W-04
+    category: Word-limit
+    instruction: "Write a concise summary of why automated tests matter."
+    source_material: ""
+    constraints:
+      tone: neutral
+      max_words: 60
+    output_format: markdown
+    expected_output: >
+      A coherent summary that respects the tight 60-word limit (soft enforcement — small overage
+      acceptable but it should be clearly concise, not a long essay). Markdown, on-topic.
+
+  - id: W-05
+    category: Blog-post
+    instruction: "Write a beginner-friendly comparison intro: Python vs JavaScript as a first language."
+    source_material: >
+      Python: readable syntax, strong in data/AI, great for scripting. JavaScript: runs in the
+      browser, essential for web front-end, huge ecosystem via npm.
+    constraints:
+      tone: friendly
+      max_words: 250
+      include_code_examples: false
+    output_format: markdown
+    expected_output: >
+      A friendly, beginner-oriented markdown intro comparing Python and JavaScript as first
+      languages, grounded in the source points (Python readability/data; JS browser/web).
+      Under ~250 words, balanced, no code blocks (include_code_examples is false).

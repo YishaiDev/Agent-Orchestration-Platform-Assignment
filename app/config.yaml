@@ -1,0 +1,48 @@
+writing_agent:
+  model: { id: gemini-2.5-flash, temperature: 0.4 }
+  judge_model: { id: gemini-2.5-flash, temperature: 0.0 }
+  default_max_words: 1500
+  enforce_word_limit: true
+  max_revisions: 2
+
+research_agent:
+  model: { id: gemini-2.5-flash, temperature: 0.0 }
+  summarizer_model: { id: gemini-2.5-flash-lite, temperature: 0.0 }
+  max_search_calls: 5
+  recursion_limit: 12
+  search_top_k: 5
+  summarization: { trigger_messages: 16, keep_recent: 6 }
+  caching: { llm_cache: memory, tavily_ttl_seconds: 3600 }
+
+analysis_agent:
+  model: { id: gemini-2.5-flash, temperature: 0.2 }
+  summarizer_model: { id: gemini-2.5-flash-lite, temperature: 0.0 }
+  recursion_limit: 10
+  max_compute_calls: 6
+  confidence_threshold: 0.5
+  summarization: { trigger_messages: 16, keep_recent: 6 }
+
+code_agent:
+  model: { id: gemini-2.5-flash, temperature: 0.2 }
+  review_model: { id: gemini-2.5-flash-lite, temperature: 0.0 }
+  default_language: python
+  max_syntax_retries: 4
+  max_review_retries: 1
+
+orchestrator:
+  planner_model: { id: gemini-2.5-flash, temperature: 0.2 }
+  decider_model: { id: gemini-2.5-flash, temperature: 0.0 }
+  synthesizer_model: { id: gemini-2.5-flash, temperature: 0.3 }
+  judge_model: { id: gemini-2.5-flash, temperature: 0.0 }
+  bounds:
+    max_replans: 1
+    max_resynth: 2
+    concurrency: 3
+    max_steps: 12
+    step_timeout_seconds: 120
+    planner_max_attempts: 2
+    context_char_budget: 6000
+
+pricing:
+  gemini-2.5-flash: { input: 0.30, output: 2.50 }
+  gemini-2.5-flash-lite: { input: 0.10, output: 0.40 }

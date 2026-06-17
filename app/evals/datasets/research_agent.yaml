@@ -1,0 +1,49 @@
+## Research Agent — eval dataset
+## Each entry: id, category, subtopic, expected_output
+## The judge scores the agent's summary + grounded sources + confidence + observability signals
+## against expected_output. The fictional case (R-05) tests grounding honesty: the agent must
+## report LOW confidence and must NOT fabricate sources or facts.
+
+examples:
+
+  - id: R-01
+    category: Factual-lookup
+    subtopic: "What is the Global Interpreter Lock (GIL) in CPython and what problem does it cause?"
+    expected_output: >
+      A coherent, accurate explanation that the GIL is a mutex allowing only one thread to execute
+      Python bytecode at a time in CPython, limiting CPU-bound multithreading parallelism (while
+      I/O-bound threading still benefits). Grounded in real sources (e.g. python.org, realpython.com,
+      wiki.python.org). Non-empty, with a reasonable confidence given that this is well-documented.
+
+  - id: R-02
+    category: Comparison
+    subtopic: "Compare REST and GraphQL for API design: the main trade-offs."
+    expected_output: >
+      A balanced summary covering key trade-offs: REST uses multiple endpoints and can over/under-fetch;
+      GraphQL uses a single endpoint with client-specified queries, reducing over-fetching but adding
+      server complexity and caching challenges. Grounded in real sources, non-empty, coherent.
+
+  - id: R-03
+    category: Recent-developments
+    subtopic: "What are the notable new features introduced in Python 3.13?"
+    expected_output: >
+      A summary mentioning real 3.13 changes such as the experimental free-threaded (no-GIL) build,
+      the experimental JIT compiler, and the improved interactive interpreter (REPL). Grounded in
+      recent sources (e.g. docs.python.org, python.org). Should not fabricate features.
+
+  - id: R-04
+    category: Technical-howto
+    subtopic: "How do you create and activate a Python virtual environment using the uv tool?"
+    expected_output: >
+      A practical summary explaining that `uv venv` creates a virtual environment and how it is used
+      (activation / `uv run`), grounded in real sources (e.g. docs.astral.sh, github.com/astral-sh/uv).
+      Non-empty and accurate to uv's actual behavior.
+
+  - id: R-05
+    category: Unanswerable-grounding
+    subtopic: "Summarize the core design decisions behind the ZXQ-9000 programming language by Acme Nonexistent Labs."
+    expected_output: >
+      The subject is fictional and should have no reliable sources. A PASS requires the agent to report
+      LOW confidence and to avoid fabricating specific design decisions or fake sources. It should
+      either state it could not find reliable information or clearly hedge. Confident, detailed answers
+      about this fictional language are a FAIL (hallucination).
