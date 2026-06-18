@@ -49,8 +49,10 @@ class TraceEntry(BaseModel):
     agent: str
     action: str
     status: str
-    duration_ms: int
-    tokens: int
+    execution_time_ms: int
+    tokens_used: int
+    started_at: str | None = None
+    completed_at: str | None = None
     input: dict[str, object] = Field(default_factory=dict)
     output: dict[str, object] = Field(default_factory=dict)
 
@@ -134,6 +136,7 @@ class RunMonitor:
         self.plan: ExecutionPlan | None = None
         self.step_status: dict[str, StepStatus] = {}
         self.results: dict[str, AgentResult] = {}
+        self.step_started_at: dict[str, datetime] = {}
         self.trace: list[TraceEntry] = []
         self.total_tokens = 0
         self.total_cost_usd = 0.0
@@ -182,21 +185,25 @@ class RunMonitor:
         self._touch()
 
     def start_step(self, step: ExecutionStep) -> None:
-        """Mark ``step`` running and record it as the current step."""
+        """Mark ``step`` running, stamp its start time, and record it as the current step."""
         self.step_status[step.id] = StepStatus.RUNNING
         self.current_step = step.id
+        self.step_started_at[step.id] = _now()
         self._log.info("step %s start (agent=%s, action=%s)", step.id, step.agent, step.action)
         self._touch()
 
     def _entry(self, step: ExecutionStep, result: AgentResult, status: StepStatus) -> TraceEntry:
-        """Build the trace entry for a finished step."""
+        """Build the trace entry for a finished step, including its start/completion timestamps."""
+        started = self.step_started_at.get(result.step_id)
         return TraceEntry(
             step_id=result.step_id,
             agent=result.agent,
             action=step.action,
             status=status.value,
-            duration_ms=result.execution_time_ms,
-            tokens=result.tokens_used,
+            execution_time_ms=result.execution_time_ms,
+            tokens_used=result.tokens_used,
+            started_at=started.isoformat() if started else None,
+            completed_at=_now().isoformat(),
             input=dict(step.input),
             output=result.output,
         )

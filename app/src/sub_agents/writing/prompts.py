@@ -1,7 +1,8 @@
 """Prompts for the Writing Agent nodes.
 
-Untrusted ``source_material`` and judge ``issues`` are fenced as data; system prompts hold the
-only authoritative instructions so injected text in the material cannot redirect the agent.
+Untrusted data values — ``source_material``, ``constraints``, and ``output_format`` — are fenced as
+data; system prompts hold the only authoritative instructions so injected text cannot redirect the
+agent. The ``instruction`` is the legitimate task directive and is intentionally not fenced.
 """
 
 from __future__ import annotations
@@ -70,7 +71,7 @@ def edit_messages(
     """Build messages for the edit node."""
     user = _join(
         f"Instruction: {instruction}",
-        f"Constraints: {constraints}",
+        _fence("constraints", str(constraints)),
         f"Target length: at most {max_words} words.",
         _issues_block(issues),
         _fence("draft", draft),
@@ -81,7 +82,7 @@ def edit_messages(
 def format_messages(text: str, output_format: str, issues: list[str]) -> Messages:
     """Build messages for the format node."""
     user = _join(
-        f"Output format: {output_format}",
+        _fence("output_format", output_format),
         _issues_block(issues),
         _fence("text", text),
     )
@@ -94,7 +95,7 @@ def judge_messages(
     """Build messages for the judge node."""
     user = _join(
         f"Instruction: {instruction}",
-        f"Requested format: {output_format}",
+        _fence("requested_format", output_format),
         f"Word limit: {max_words}; actual word count: {word_count}.",
         _fence("output", content),
     )

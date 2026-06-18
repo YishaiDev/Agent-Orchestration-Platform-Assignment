@@ -27,6 +27,9 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one goal through the orchestration engine.")
     parser.add_argument("goal", help="The task goal to plan and execute.")
     parser.add_argument("--constraints", default="", help="Optional free-text constraints.")
+    parser.add_argument(
+        "--output-format", default="", help="Optional output format hint, e.g. markdown."
+    )
     parser.add_argument("--max-replans", type=int, default=None, help="Override the re-plan bound.")
     parser.add_argument(
         "--deadline", type=float, default=None, help="Optional wall-clock budget in seconds."
@@ -44,6 +47,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         session_id="cli",
         max_replans=args.max_replans,
         deadline_seconds=args.deadline,
+        output_format=args.output_format,
     )
     monitor = get_run_registry().get(task_id)
     return monitor.final_result or {} if monitor else {}

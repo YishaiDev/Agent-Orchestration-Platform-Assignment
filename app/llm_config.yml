@@ -18,7 +18,7 @@ providers:
       llama-3.1-8b-instant: { input: 0.05, output: 0.08 }
       openai/gpt-oss-20b: { input: 0.10, output: 0.50 }
   gemini:
-    tiers: { big: gemini-3.5-flash, small: gemini-2.5-flash, tools: gemini-2.5-flash }
+    tiers: { big: gemini-2.5-flash, small: gemini-2.5-flash, tools: gemini-2.5-flash }
     pricing:
       gemini-3.5-flash: { input: 0.30, output: 2.50 }
       gemini-2.5-flash: { input: 0.10, output: 0.40 }

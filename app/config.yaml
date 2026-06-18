@@ -1,6 +1,6 @@
 # Which LLM provider to use. Model ids + pricing per tier live in llm_config.yml.
 # Switch the whole platform between providers by changing this one line.
-provider: groq          # groq | gemini
+provider: gemini        # groq | gemini
 
 writing_agent:
   model: { tier: big, temperature: 0.4 }
@@ -12,8 +12,8 @@ writing_agent:
 research_agent:
   model: { tier: tools, temperature: 0.0 }
   summarizer_model: { tier: big, temperature: 0.0 }
-  max_search_calls: 3
-  recursion_limit: 6
+  max_search_calls: 2
+  recursion_limit: 3
   search_top_k: 3
   summarization: { trigger_messages: 8, keep_recent: 4 }
   caching: { llm_cache: memory, tavily_ttl_seconds: 3600 }
@@ -41,11 +41,13 @@ code_agent:
 orchestrator:
   planner_model: { tier: big, temperature: 0.2 }
   decider_model: { tier: big, temperature: 0.0 }
-  synthesizer_model: { tier: big, temperature: 0.3 }
+  synthesizer_model: { tier: tools, temperature: 0.3 }
   judge_model: { tier: big, temperature: 0.0 }
   bounds:
     max_replans: 1
     max_resynth: 2
+    # Max steps that may run at once. Set to 1 for fully sequential execution (one step at a
+    # time, no parallelism); dependency order is honored at any value. Higher = more parallelism.
     concurrency: 3
     max_steps: 12
     step_timeout_seconds: 120

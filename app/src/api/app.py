@@ -8,12 +8,15 @@ so status, progress, and the trace are visible while a task is still executing.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 
 from app.src.api.models import (
+    AgentCatalog,
     AgentInfo,
     CancelResponse,
     TaskCreated,
@@ -60,6 +63,36 @@ def _require_monitor(registry: RunRegistry, task_id: str) -> RunMonitor:
     return monitor
 
 
+_TERMINAL_STATES = {"completed", "failed", "cancelled"}
+
+
+def _stream_snapshot(monitor: RunMonitor) -> dict[str, object]:
+    """Build the per-tick payload pushed over the SSE stream."""
+    progress = monitor.progress()
+    return {
+        "task_id": monitor.task_id,
+        "status": monitor.state.value,
+        "progress": progress.model_dump(),
+        "completed_steps": monitor.completed_count(),
+        "total_tokens": monitor.total_tokens,
+        "total_cost_usd": monitor.total_cost_usd,
+    }
+
+
+async def _event_stream(monitor: RunMonitor, interval: float = 0.25) -> AsyncIterator[bytes]:
+    """Yield SSE ``data:`` frames whenever progress changes, ending at a terminal state."""
+    last: object = None
+    while True:
+        snapshot = _stream_snapshot(monitor)
+        key = (snapshot["status"], snapshot["completed_steps"], monitor.current_step)
+        if key != last:
+            yield f"data: {json.dumps(snapshot)}\n\n".encode()
+            last = key
+        if snapshot["status"] in _TERMINAL_STATES:
+            return
+        await asyncio.sleep(interval)
+
+
 def _status_view(monitor: RunMonitor) -> TaskStatusResponse:
     """Project a monitor into the status response shape."""
     return TaskStatusResponse(
@@ -70,7 +103,7 @@ def _status_view(monitor: RunMonitor) -> TaskStatusResponse:
         progress=monitor.progress(),
         total_tokens=monitor.total_tokens,
         total_cost_usd=monitor.total_cost_usd,
-        trace=monitor.trace_dicts(),
+        execution_trace=monitor.trace_dicts(),
     )
 
 
@@ -97,9 +130,9 @@ def create_app(
 
     @app.post("/tasks", response_model=TaskCreated, status_code=202)
     async def submit_task(request: TaskRequest) -> TaskCreated:
-        """Accept a goal, spawn the background run, and return its task id."""
+        """Accept a goal, spawn the background run, return its id with spec status ``planning``."""
         task_id = _spawn_run(registry, make_deps, request)
-        return TaskCreated(task_id=task_id, status="pending")
+        return TaskCreated(task_id=task_id, status="planning")
 
     @app.get("/tasks/{task_id}", response_model=TaskStatusResponse)
     async def get_status(task_id: str) -> TaskStatusResponse:
@@ -114,6 +147,20 @@ def create_app(
             raise HTTPException(status_code=409, detail=f"task {task_id} has no result yet")
         return monitor.final_result
 
+    @app.get("/tasks/{task_id}/plan")
+    async def get_plan(task_id: str) -> dict[str, object]:
+        """Return the validated execution plan, or 409 before planning has completed."""
+        monitor = _require_monitor(registry, task_id)
+        if monitor.plan is None:
+            raise HTTPException(status_code=409, detail=f"task {task_id} has no plan yet")
+        return monitor.plan.model_dump()
+
+    @app.get("/tasks/{task_id}/stream")
+    async def stream_task(task_id: str) -> StreamingResponse:
+        """Stream live progress as Server-Sent Events until the task reaches a terminal state."""
+        monitor = _require_monitor(registry, task_id)
+        return StreamingResponse(_event_stream(monitor), media_type="text/event-stream")
+
     @app.post("/tasks/{task_id}/cancel", response_model=CancelResponse)
     async def cancel_task(task_id: str) -> CancelResponse:
         """Request cooperative cancellation and report the steps completed so far."""
@@ -121,14 +168,15 @@ def create_app(
         monitor.request_cancel()
         return CancelResponse(
             task_id=task_id,
-            status="cancelling",
+            status="cancelled",
             completed_steps=monitor.completed_step_ids(),
         )
 
-    @app.get("/agents", response_model=list[AgentInfo])
-    async def list_agents() -> list[AgentInfo]:
+    @app.get("/agents", response_model=AgentCatalog)
+    async def list_agents() -> AgentCatalog:
         """Return the registered agents with their capabilities and status."""
-        return [AgentInfo.model_validate(entry) for entry in describe_agents()]
+        agents = [AgentInfo.model_validate(entry) for entry in describe_agents()]
+        return AgentCatalog(agents=agents)
 
     return app
 

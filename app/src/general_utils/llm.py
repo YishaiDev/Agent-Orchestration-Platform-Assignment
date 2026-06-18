@@ -40,7 +40,7 @@ def _resolve_provider_key() -> tuple[str, str, str]:
 
 
 def build_chat_model(
-    model_id: str, temperature: float, max_retries: int = 6
+    model_id: str, temperature: float, max_retries: int = 3
 ) -> BaseChatModel:
     """Build a chat model through LangChain's provider-agnostic initializer.
 

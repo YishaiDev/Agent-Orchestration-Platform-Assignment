@@ -31,19 +31,33 @@ class ProvenanceEntry(BaseModel):
     sources: list[str] = Field(default_factory=list)
 
 
+class ResultPayload(BaseModel):
+    """The spec's nested ``result`` object: the final content, its format, and word count."""
+
+    content: str
+    format: str = "markdown"
+    word_count: int = 0
+
+
 class FinalResult(BaseModel):
-    """The synthesized answer plus provenance and run totals (``GET /tasks/{id}/result``)."""
+    """The synthesized answer in the spec's Final Result shape (``GET /tasks/{id}/result``).
+
+    The spec keys (``result``/``execution_trace``/``total_tokens``/``total_time_ms``) are matched
+    exactly; provenance, confidence, and the failed/skipped lists are retained as additive fields
+    so attribution and partial-run accounting are not lost.
+    """
 
     task_id: str
     status: str
-    content: str
-    confidence: float
+    result: ResultPayload
+    execution_trace: list[dict[str, object]] = Field(default_factory=list)
+    total_tokens: int = 0
+    total_time_ms: int = 0
+    confidence: float = 0.0
     provenance: list[ProvenanceEntry] = Field(default_factory=list)
     failed_steps: list[str] = Field(default_factory=list)
     skipped_steps: list[str] = Field(default_factory=list)
-    total_tokens: int = 0
     total_cost_usd: float = 0.0
-    total_time_ms: int = 0
 
 
 class RunState(TypedDict, total=False):

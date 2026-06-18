@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -125,7 +126,18 @@ def test_record_result_tracks_trace_totals_progress() -> None:
     assert round(monitor.total_cost_usd, 3) == 0.01
     progress = monitor.progress()
     assert progress.total_steps == 2 and progress.completed_steps == 1
-    assert monitor.trace_dicts()[0]["agent"] == "research"
+    entry = monitor.trace_dicts()[0]
+    assert entry["agent"] == "research"
+    assert entry["started_at"] is not None and entry["completed_at"] is not None
+    assert entry["tokens_used"] == 7 and entry["execution_time_ms"] == 12
+
+
+def test_deadline_exceeded_stops_launching() -> None:
+    monitor = RunMonitor("t1", deadline_seconds=0.02)
+    assert monitor.deadline_exceeded() is False
+    time.sleep(0.05)
+    assert monitor.deadline_exceeded() is True
+    assert monitor.should_stop_launching() is True
 
 
 def test_request_replan_stops_launching() -> None:
@@ -158,6 +170,7 @@ def _main() -> None:
         test_optional_failure_with_optional_dependent_is_skippable,
         test_structural_failure_kills_all_remaining,
         test_record_result_tracks_trace_totals_progress,
+        test_deadline_exceeded_stops_launching,
         test_request_replan_stops_launching,
         test_request_cancel_and_skip_marks,
     ]

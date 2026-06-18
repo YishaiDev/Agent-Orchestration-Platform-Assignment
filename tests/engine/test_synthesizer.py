@@ -117,10 +117,16 @@ def test_build_final_result_assembles_provenance_and_totals() -> None:
     monitor.record_result(plan.step_by_id("s1"), _result("s1", "research"))
     monitor.start_step(plan.step_by_id("s2"))
     monitor.record_result(plan.step_by_id("s2"), _result("s2", "analysis", status="failed"))
-    final = build_final_result(monitor, Synthesis(content="ans", confidence=0.6), "completed")
+    final = build_final_result(
+        monitor, Synthesis(content="one two three", confidence=0.6), "completed", "markdown"
+    )
     assert final.status == "completed"
     assert final.total_tokens == 6
     assert final.failed_steps == ["s2"]
+    assert final.result.content == "one two three"
+    assert final.result.format == "markdown"
+    assert final.result.word_count == 3
+    assert len(final.execution_trace) == 2
     prov_ids = {p.step_id for p in final.provenance}
     assert prov_ids == {"s1", "s2"}
     s1_prov = next(p for p in final.provenance if p.step_id == "s1")

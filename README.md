@@ -34,7 +34,10 @@ Goal ─▶  plan ─▶ execute ─▶ evaluate ──(structural failure: re-p
 
 The only LLM calls are the **planner**, the **re-plan decider**, and the **synthesizer**; step
 execution is ordinary observable code. See [DECISIONS.md](DECISIONS.md) for the design rationale and
-[AI_USAGE.md](AI_USAGE.md) for how the AI was driven.
+[AI_USAGE.md](AI_USAGE.md) for how the AI was driven. For the cross-cutting concerns, see
+[app/ARCHITECTURE.md](app/ARCHITECTURE.md) (the full graph diagram — outer loop, sub-agents, middleware),
+[app/SECURITY.md](app/SECURITY.md) (untrusted input, secrets, schema validation, prompt-injection) and
+[app/OBSERVABILITY.md](app/OBSERVABILITY.md) (execution trace, progress tracking, failure diagnosis).
 
 ## Architecture
 
@@ -127,7 +130,7 @@ Submit a real multi-step task (this **uses your active provider key**, `GROQ_API
 then poll and fetch the result:
 
 ```bash
-# submit -> {"task_id": "<id>", "status": "pending"}
+# submit -> {"task_id": "<id>", "status": "planning"}
 curl -X POST http://localhost:8000/tasks \
   -H "Content-Type: application/json" \
   -d '{"goal": "Explain what a topological sort is, then write a 3-sentence beginner summary"}'
@@ -138,7 +141,7 @@ curl http://localhost:8000/tasks/<id>
 # synthesized answer with provenance + token/cost totals (409 until ready)
 curl http://localhost:8000/tasks/<id>/result
 
-# optional: cooperative cancel -> {"status":"cancelling","completed_steps":[...]}
+# optional: cooperative cancel -> {"status":"cancelled","completed_steps":[...]}
 curl -X POST http://localhost:8000/tasks/<id>/cancel
 ```
 
@@ -209,6 +212,8 @@ this catalog live.
 | `POST` | `/tasks` | Submit a goal; returns a `task_id` and starts the run in the background. |
 | `GET` | `/tasks/{id}` | Live status, progress, totals, and the per-step execution trace. |
 | `GET` | `/tasks/{id}/result` | The synthesized final result with provenance (`409` until ready). |
+| `GET` | `/tasks/{id}/plan` | The validated execution plan: steps, dependencies, and parallel groups (`409` until planned). |
+| `GET` | `/tasks/{id}/stream` | Server-Sent Events stream of live progress until the task reaches a terminal state. |
 | `POST` | `/tasks/{id}/cancel` | Cooperative cancel; returns the steps completed so far. |
 | `GET` | `/agents` | The registered agents, their capabilities, and status. |
 | `GET` | `/health` | Liveness probe. |
@@ -221,7 +226,7 @@ Submit a goal:
 curl -X POST http://localhost:8000/tasks \
   -H "Content-Type: application/json" \
   -d '{"goal": "Research electric vehicle adoption trends and write a one-page brief"}'
-# -> {"task_id": "a1b2...", "status": "pending"}
+# -> {"task_id": "a1b2...", "status": "planning"}
 ```
 
 The planner decomposes it into a DAG (research → analyze → write):
@@ -243,27 +248,78 @@ The planner decomposes it into a DAG (research → analyze → write):
 }
 ```
 
-Fetch the synthesized result once the run completes:
+Fetch the synthesized result once the run completes. The shape matches the assignment's **Final
+Result Format** — a nested `result` (`content`/`format`/`word_count`), the full `execution_trace`, and
+run totals — plus additive fields (`provenance`, `confidence`, `failed_steps`, `skipped_steps`,
+`total_cost_usd`):
+
+```json
+{
+  "task_id": "a1b2...",
+  "status": "completed",
+  "result": { "content": "# EV adoption brief...", "format": "markdown", "word_count": 612 },
+  "execution_trace": [
+    { "step_id": "s1", "agent": "research", "action": "research", "status": "completed",
+      "tokens_used": 5570, "execution_time_ms": 6541,
+      "started_at": "2026-06-18T09:46:38Z", "completed_at": "2026-06-18T09:46:45Z",
+      "input": { "subtopic": "..." }, "output": { "content": "...", "sources": ["..."], "confidence": 0.9 } }
+  ],
+  "total_tokens": 14595,
+  "total_time_ms": 20247,
+  "confidence": 0.95,
+  "provenance": [ { "step_id": "s1", "agent": "research", "action": "research", "status": "completed",
+                    "confidence": 0.9, "sources": ["..."] } ],
+  "failed_steps": [],
+  "skipped_steps": [],
+  "total_cost_usd": 0.001987
+}
+```
+
+### Reading the answer as formatted markdown
+
+`result.content` is already markdown, but the `/result` endpoint (and the CLI) return it inside a JSON
+**string**, so newlines show as `\n` and any typographic characters (e.g. `–`, `‑`) show as `\uXXXX`.
+That is correct JSON — to *render* the answer, extract and decode that one field rather than copying
+the raw blob:
 
 ```bash
-curl http://localhost:8000/tasks/a1b2.../result
-# -> { "status": "completed", "content": "...", "confidence": 0.86,
-#      "provenance": [...], "failed_steps": [], "skipped_steps": [],
-#      "total_tokens": 1234, "total_cost_usd": 0.004, "total_time_ms": 8200 }
+# from the live API
+curl -s http://localhost:8000/tasks/a1b2.../result | jq -r '.result.content' > answer.md
+
+# from a saved CLI result file
+jq -r '.result.content' result.json > answer.md
 ```
+
+`jq -r` ("raw") unescapes the string — `\n` becomes real line breaks and `\uXXXX` becomes the actual
+character — so `answer.md` renders cleanly. Equivalents without `jq`:
+
+```bash
+# Python
+python -c "import json,sys; print(json.load(open('result.json'))['result']['content'])" > answer.md
+```
+```powershell
+# PowerShell
+(Get-Content result.json -Raw | ConvertFrom-Json).result.content | Out-File answer.md -Encoding utf8
+```
+
+> If you ever embed the full raw JSON inside a markdown code block, wrap it in a **four-backtick**
+> fence (` ````json `) — the answer can itself contain triple-backtick ` ```python ` blocks, and a
+> three-backtick outer fence would be closed early by them.
 
 ## Track progress
 
 `GET /tasks/{id}` is readable **while the task is still running** — the API reads the live monitor, so
 status moves `pending → planning → executing → completed`, `progress.completed_steps` climbs, and the
-`trace` grows one entry per finished step (agent, action, input, output, status, duration, tokens):
+`execution_trace` grows one entry per finished step (`agent`, `action`, `input`, `output`, `status`,
+`tokens_used`, `execution_time_ms`, `started_at`, `completed_at`):
 
 ```bash
 curl http://localhost:8000/tasks/a1b2...
 # -> { "status": "executing",
 #      "progress": {"total_steps": 3, "completed_steps": 1, "current_step": "s2"},
 #      "total_tokens": 420, "total_cost_usd": 0.001,
-#      "trace": [ {"step_id": "s1", "agent": "research", "status": "completed", ...} ] }
+#      "execution_trace": [ {"step_id": "s1", "agent": "research", "action": "research",
+#                            "status": "completed", "tokens_used": 412, "execution_time_ms": 6500, ...} ] }
 ```
 
 ## Configuration
@@ -275,3 +331,30 @@ provider live in `app/llm_config.yml` — switch the whole platform between **Gr
 changing the single `provider:` line. Secrets are read from `app/.env` (never hardcoded). Concurrency
 defaults to `3` to stay within free-tier rate limits (Groq's is generous; Gemini's allows only ~20
 requests/day).
+
+**Sequential vs parallel:** `orchestrator.bounds.concurrency: 1` runs the DAG fully sequentially (one
+step at a time); higher values run independent steps in parallel. Dependency order holds at any value.
+
+## Requirements Coverage
+
+What's applied against the assignment's Technical Requirements:
+
+| Requirement | Status | Notes |
+| --- | --- | --- |
+| Python 3.11+ | ✅ | `app/pyproject.toml` |
+| Async web framework | ✅ | FastAPI |
+| ≥4 agent types | ✅ | research, writing, analysis, code |
+| Task planning / decomposition | ✅ | `engine/planner.py` → `engine/validation.py` |
+| Dependency-based execution | ✅ | `engine/scheduler.py` (deps gate each launch) |
+| Result synthesis | ✅ | `engine/synthesizer.py`, conflict-resolving + provenance |
+| Containerized (docker-compose) | ✅ | `Dockerfile`, `docker-compose.yml` |
+| ≥6 meaningful tests | ✅ | 125 passing: submission, plan generation, sequential & parallel execution, error handling, synthesis |
+| Sequential execution | ✅ | `concurrency: 1` (same scheduler) |
+| Parallel step execution | ✅ | continuous-concurrency scheduler |
+| Progress tracking | ✅ | `GET /tasks/{id}` (live) |
+| Execution traces | ✅ | per-step agent/action/io/duration/tokens |
+| Token usage tracking | ✅ | per step + run totals |
+| Dynamic re-planning on failure | ✅ | structural-failure preempt → re-plan decider |
+| Agent capability matching | ✅ | `(agent, action)` registry allowlist |
+| Cost estimation before execution | ✅ | `general_utils/cost.py::estimate_cost` → `est_cost_usd` |
+| Streaming intermediate results | ✅ | SSE via `GET /tasks/{id}/stream` |

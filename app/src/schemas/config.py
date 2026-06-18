@@ -87,7 +87,7 @@ class OrchestratorConfig(BaseModel):
     judge_temperature: float = 0.0
     max_replans: int = 1
     max_resynth: int = 2
-    concurrency: int = 3
+    concurrency: int = 3  # 1 = fully sequential execution; higher allows parallel steps.
     max_steps: int = 12
     step_timeout_seconds: int = 120
     planner_max_attempts: int = 2

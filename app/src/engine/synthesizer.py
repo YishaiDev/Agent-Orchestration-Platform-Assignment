@@ -20,7 +20,7 @@ from app.src.general_utils.agent_base import AgentResult, invoke_structured
 from app.src.general_utils.llm import build_chat_model
 from app.src.schemas.config import AppConfig, get_config
 from app.src.schemas.plan import ExecutionPlan, ExecutionStep, StepStatus
-from app.src.schemas.run_state import FinalResult, ProvenanceEntry
+from app.src.schemas.run_state import FinalResult, ProvenanceEntry, ResultPayload
 
 _OUTPUT_CHARS = 1200
 _LOST_STATES = {StepStatus.SKIPPED, StepStatus.CANCELLED}
@@ -166,27 +166,36 @@ def _steps_in(monitor: RunMonitor, states: set[StepStatus]) -> list[str]:
     return [sid for sid, status in monitor.step_status.items() if status in states]
 
 
-def build_final_result(monitor: RunMonitor, synthesis: Synthesis, status: str) -> FinalResult:
-    """Assemble the final result with provenance and run totals.
+def build_final_result(
+    monitor: RunMonitor, synthesis: Synthesis, status: str, output_format: str = ""
+) -> FinalResult:
+    """Assemble the final result in the spec's shape, with provenance and run totals.
 
     Args:
         monitor: The run monitor holding plan, results, status, and totals.
         synthesis: The synthesizer's prose and confidence.
         status: The task-level status string to stamp on the result.
+        output_format: The requested output format echoed into the nested ``result`` payload.
 
     Returns:
-        A populated FinalResult.
+        A populated FinalResult whose ``result``/``execution_trace``/totals match the spec.
     """
     elapsed_ms = int((monitor.updated_at - monitor.created_at).total_seconds() * 1000)
+    payload = ResultPayload(
+        content=synthesis.content,
+        format=output_format or "markdown",
+        word_count=len(synthesis.content.split()),
+    )
     return FinalResult(
         task_id=monitor.task_id,
         status=status,
-        content=synthesis.content,
+        result=payload,
+        execution_trace=monitor.trace_dicts(),
+        total_tokens=monitor.total_tokens,
+        total_time_ms=elapsed_ms,
         confidence=synthesis.confidence,
         provenance=_provenance(monitor),
         failed_steps=_steps_in(monitor, {StepStatus.FAILED}),
         skipped_steps=_steps_in(monitor, _LOST_STATES),
-        total_tokens=monitor.total_tokens,
         total_cost_usd=round(monitor.total_cost_usd, 6),
-        total_time_ms=elapsed_ms,
     )

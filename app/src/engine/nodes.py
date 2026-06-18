@@ -189,7 +189,7 @@ async def synthesize_node(state: RunState, config: RunnableConfig) -> dict[str, 
 
 
 def _accept(
-    monitor: RunMonitor, synthesis: Synthesis, degraded: bool
+    monitor: RunMonitor, synthesis: Synthesis, degraded: bool, output_format: str = ""
 ) -> dict[str, object]:
     """Calibrate confidence, build the final result, and stamp terminal state."""
     base = _final_status(monitor)
@@ -200,7 +200,7 @@ def _accept(
             synthesis.confidence, monitor.completed_count(), len(monitor.plan.steps)
         )
         final_synth = Synthesis(content=synthesis.content, confidence=calibrated)
-    final = build_final_result(monitor, final_synth, status)
+    final = build_final_result(monitor, final_synth, status, output_format)
     monitor.set_state(TaskState.COMPLETED if status == "completed_degraded" else TaskState(status))
     monitor.set_final_result(final.model_dump())
     return {"decision": "accept", "final_result": final.model_dump(),
@@ -220,7 +220,10 @@ def _stage_replan(
     try:
         merged = merge_replan(_require_plan(monitor), decision, monitor.step_status, round_no)
     except PlanValidationError:
-        return _accept(monitor, _draft(monitor), degraded=True)
+        return _accept(
+            monitor, _draft(monitor), degraded=True,
+            output_format=state.get("output_format") or "",
+        )
     monitor.attach_plan(merged)
     return {"decision": "replan", "replans": round_no, "resynth_rounds": 0, "synth_feedback": ""}
 
@@ -230,10 +233,11 @@ async def judge_node(state: RunState, config: RunnableConfig) -> dict[str, objec
     deps = _deps(config)
     monitor = _monitor(config, state)
     synthesis = _draft(monitor)
+    out_fmt = state.get("output_format") or ""
     if monitor.plan is None or monitor.completed_count() == 0:
-        return _accept(monitor, synthesis, degraded=False)
+        return _accept(monitor, synthesis, degraded=False, output_format=out_fmt)
     if state.get("synth_failed"):
-        return _accept(monitor, synthesis, degraded=True)
+        return _accept(monitor, synthesis, degraded=True, output_format=out_fmt)
     det_errors = check_synthesis(
         synthesis, monitor.plan, monitor.completed_count(), state.get("output_format") or None
     )
@@ -244,14 +248,17 @@ async def judge_node(state: RunState, config: RunnableConfig) -> dict[str, objec
         )
     except Exception:
         logger.exception("judge call failed; accepting current draft as degraded")
-        return _accept(monitor, synthesis, degraded=True)
+        return _accept(monitor, synthesis, degraded=True, output_format=out_fmt)
     monitor.total_tokens += tokens
     if verdict.verdict == "resynthesize" and state.get("resynth_rounds", 0) < state["max_resynth"]:
         return {"decision": "resynthesize", "synth_feedback": verdict.feedback,
                 "resynth_rounds": state.get("resynth_rounds", 0) + 1}
     if verdict.verdict == "replan" and state.get("replans", 0) < state["max_replans"]:
         return _stage_replan(state, monitor, verdict)
-    return _accept(monitor, synthesis, degraded=bool(det_errors) or verdict.verdict != "accept")
+    return _accept(
+        monitor, synthesis, degraded=bool(det_errors) or verdict.verdict != "accept",
+        output_format=out_fmt,
+    )
 
 
 def route_after_judge(state: RunState) -> str:

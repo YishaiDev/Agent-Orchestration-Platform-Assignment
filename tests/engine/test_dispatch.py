@@ -73,6 +73,39 @@ def test_routes_analysis_with_upstream_data() -> None:
     assert out.output["instruction"] == "compare them"
 
 
+def test_routes_analysis_injects_all_upstream_deps() -> None:
+    async def fake_analysis(instruction, action, data, sources, step_id, session_id):  # noqa: ANN001
+        return _ok(step_id, data=data)
+
+    saved = _patch({"run_analysis_agent": fake_analysis})
+    try:
+        step = ExecutionStep(id="s3", agent="analysis", action="analyze",
+                             input={"instruction": "analyze both"}, dependencies=["s1", "s2"])
+        results = {
+            "s1": _result("s1", {"content": "facts one"}),
+            "s2": _result("s2", {"content": "facts two"}),
+        }
+        out = asyncio.run(dispatch_module.dispatch(step, results))
+    finally:
+        _restore(saved)
+    contents = [item["content"] for item in out.output["data"]]
+    assert contents == ["facts one", "facts two"]
+
+
+def test_missing_dependency_in_results_yields_empty_data() -> None:
+    async def fake_analysis(instruction, action, data, sources, step_id, session_id):  # noqa: ANN001
+        return _ok(step_id, data=data)
+
+    saved = _patch({"run_analysis_agent": fake_analysis})
+    try:
+        step = ExecutionStep(id="s2", agent="analysis", action="analyze",
+                             input={"instruction": "analyze"}, dependencies=["s1"])
+        out = asyncio.run(dispatch_module.dispatch(step, {}))
+    finally:
+        _restore(saved)
+    assert out.output["data"] is None
+
+
 def test_routes_code_with_context_string() -> None:
     async def fake_code(task_input, action, step_id, language, upstream_context):  # noqa: ANN001
         return _ok(step_id, task_input=task_input, language=language, context=upstream_context)
@@ -142,6 +175,8 @@ def test_mapping_error_returns_failed_result() -> None:
 def _main() -> None:
     tests = [
         test_routes_analysis_with_upstream_data,
+        test_routes_analysis_injects_all_upstream_deps,
+        test_missing_dependency_in_results_yields_empty_data,
         test_routes_code_with_context_string,
         test_failed_upstream_not_injected,
         test_context_trimmed_to_budget,

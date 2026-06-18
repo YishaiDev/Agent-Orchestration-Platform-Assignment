@@ -50,7 +50,7 @@ def extract_tokens(message: BaseMessage | None) -> int:
 
 
 @retry(
-    stop=stop_after_attempt(6),
+    stop=stop_after_attempt(3),
     wait=wait_exponential_jitter(initial=4, max=70),
     reraise=True,
 )

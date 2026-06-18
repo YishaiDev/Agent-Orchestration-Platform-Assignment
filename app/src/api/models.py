@@ -58,7 +58,7 @@ class TaskStatusResponse(BaseModel):
     progress: Progress
     total_tokens: int
     total_cost_usd: float
-    trace: list[dict[str, object]] = Field(default_factory=list)
+    execution_trace: list[dict[str, object]] = Field(default_factory=list)
 
 
 class CancelResponse(BaseModel):
@@ -76,3 +76,9 @@ class AgentInfo(BaseModel):
     description: str
     capabilities: list[str]
     status: str
+
+
+class AgentCatalog(BaseModel):
+    """Response for ``GET /agents``: the registered agents under the spec's ``agents`` key."""
+
+    agents: list[AgentInfo] = Field(default_factory=list)

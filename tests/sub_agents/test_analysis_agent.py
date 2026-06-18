@@ -78,7 +78,7 @@ def _final_msg(text: str = "Analysis done.", in_tok: int = 200, out_tok: int = 5
 class ScriptedModel(FakeMessagesListChatModel):
     """Main model double: cycles a scripted response list; tolerates tool binding."""
 
-    def bind_tools(self, tools: object, **kwargs: object) -> "ScriptedModel":
+    def bind_tools(self, tools: object, **kwargs: object) -> ScriptedModel:
         return self
 
 
@@ -108,7 +108,7 @@ class FakeSummarizer(FakeMessagesListChatModel):
     summary_out: int = 40
     fail_structured: bool = False
 
-    def bind_tools(self, tools: object, **kwargs: object) -> "FakeSummarizer":
+    def bind_tools(self, tools: object, **kwargs: object) -> FakeSummarizer:
         return self
 
     def with_structured_output(self, schema: object, **kwargs: object) -> _StructuredFake:
@@ -147,7 +147,9 @@ def _cfg(**overrides: object) -> AnalysisAgentConfig:
 async def _drive_agent(
     responses: list[AIMessage], cfg: AnalysisAgentConfig, ctx: AnalysisContext
 ) -> tuple[dict, AnalysisContext]:
-    agent = build_analysis_agent(ScriptedModel(responses=responses), FakeSummarizer(), cfg, _MAIN_PRICE)
+    agent = build_analysis_agent(
+        ScriptedModel(responses=responses), FakeSummarizer(), cfg, _MAIN_PRICE
+    )
     final = await agent.ainvoke({"messages": [{"role": "user", "content": "go"}]}, context=ctx)
     return final, ctx
 
@@ -202,7 +204,9 @@ def test_tokens_accrue_into_context() -> None:
 
 def test_compaction_fires_and_agent_still_returns() -> None:
     cfg = _cfg(trigger_messages=2, keep_recent=2)
-    model = ScriptedModel(responses=[_compute_msg("c0", {"expression": "1+1"})] * 3 + [_final_msg()])
+    model = ScriptedModel(
+        responses=[_compute_msg("c0", {"expression": "1+1"})] * 3 + [_final_msg()]
+    )
     summarizer = FakeSummarizer()
     agent = build_analysis_agent(model, summarizer, cfg, _MAIN_PRICE)
     final = asyncio.run(

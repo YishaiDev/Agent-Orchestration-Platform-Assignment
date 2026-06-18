@@ -4,11 +4,13 @@
 
 - **Claude Code (Opus 4.8)** — primary pair-programming agent for design, implementation,
   test-harness authoring, refactoring, and keeping `DECISIONS.md` in sync.
-- **Switchable LLM provider** — a `big`/`small` model tier per role, resolved from
+- **Switchable LLM provider** — a `big`/`small`/`tools` model tier per role, resolved from
   `app/llm_config.yml` for whichever `provider:` is active in `app/config.yaml`. **Groq**
-  (`llama-3.3-70b-versatile` big / `llama-3.1-8b-instant` small, `model_provider="groq"`,
-  `GROQ_API_KEY`) is the default because its free tier is far larger than Gemini's, so multi-step
-  runs complete without hitting a daily cap; **Google Gemini** (`gemini-3.5-flash` big /
+  (`llama-3.3-70b-versatile` big / `llama-3.1-8b-instant` small / `openai/gpt-oss-20b` tools,
+  `model_provider="groq"`, `GROQ_API_KEY`) is the default because its free tier is far larger than
+  Gemini's, so multi-step runs complete without hitting a daily cap; the `tools` tier is a separate,
+  function-calling-reliable model the Research Agent binds its web-search tool to, because Llama on
+  Groq intermittently emits malformed tool calls. **Google Gemini** (`gemini-3.5-flash` big /
   `gemini-2.5-flash` small, `model_provider="google_genai"`, `GOOGLE_API_KEY`) stays fully supported.
   Both go through LangChain `init_chat_model`; `build_chat_model` picks the provider + key from the
   active `provider:` in config.
@@ -129,22 +131,75 @@
   (`src/`, `main.py`, `cli.py`, `config.yaml`, `evals/`) — a clean tree *and* a secret-free,
   unbroken image from one change, with `.git/info/exclude` preserving the gitignore protection
   invisibly.
-- **A green test suite hid two spec-conformance defects until I validated against the PDF itself.**
-  All 112 offline tests passed, but I distrusted "green" as proof of *spec* conformance and ran the
-  app against the assignment's literal **Task Format** and **API** examples. Two real defects surfaced
-  that no test exercised: (1) the documented body — `constraints` as a JSON object plus `output_format`
-  — was **rejected with 422**, because the request model accepted only free-text constraints and never
-  surfaced `output_format` (the engine threaded it end-to-end; only the HTTP layer was unwired). I made
-  `api/models.py::TaskRequest` accept the object **or** string form and expose `output_format`,
-  backward-compatibly. (2) The documented local run, `cd app && uv run python main.py`, died with
-  `ModuleNotFoundError: No module named 'app'` — the AI-built entry point only worked because the
-  *container* sets `PYTHONPATH=/workspace`; nothing put the repo root on `sys.path` for a local run. I
-  fixed `main.py` to mirror the test files' path-insertion. Both are exactly the kind of gap a passing
-  suite cannot see — the tests drive the engine with fakes; they never POST the spec's own JSON or boot
-  the documented command.
+- **A green test suite hid three spec-conformance defects until I validated against the PDF itself.**
+  All offline tests passed, but I distrusted "green" as proof of *spec* conformance and ran the app
+  against the assignment's literal **Task Format**, **API**, and **Final Result** examples. Three real
+  defects surfaced that no test exercised:
+
+  1. **Request body rejected with 422.** The documented body — `constraints` as a JSON object plus
+     `output_format` — failed validation: the request model accepted only free-text constraints and
+     never surfaced `output_format` (the engine threaded it end-to-end; only the HTTP layer was
+     unwired). Fix: `api/models.py::TaskRequest` now accepts the object **or** string form and exposes
+     `output_format`, backward-compatibly.
+  2. **Local run crashed on import.** `cd app && uv run python main.py` died with
+     `ModuleNotFoundError: No module named 'app'` — the entry point only worked because the *container*
+     sets `PYTHONPATH=/workspace`; nothing put the repo root on `sys.path` for a local run. Fix:
+     `main.py` mirrors the test files' path-insertion.
+  3. **Result envelope was flat, not nested.** `GET /tasks/{id}/result` returned a flat body
+     (`content`, `confidence`, `total_*`) while the spec shows a nested `result`
+     (`content`/`format`/`word_count`) plus a top-level `execution_trace` — the request side spoke the
+     spec but the response side did not. Fix: restructured `FinalResult` to the spec shape (provenance
+     and criticality retained as additive fields) and stamped per-step `started_at`/`completed_at` onto
+     the trace.
+
+  All three are the kind of gap a passing suite cannot see — the tests drove the engine with fakes
+  against their *own* shapes; they never POST the spec's own JSON, boot the documented command, or
+  assert the spec's literal result envelope. I then added tests that *do* lock those shapes.
+
+- **AI's first re-plan-trigger fix was a magic number; I redirected it to criticality.** A live
+  robustness run showed a load-bearing research failure gutting 5 of 6 steps yet *not* re-planning,
+  because the classifier said "skippable" the moment any one branch survived. The AI's first fix was a
+  **numeric loss-threshold** — re-plan when the cascade removes ≥ 50% of remaining steps. I didn't like
+  it: *"maybe we can ask the planner to tag each step as crucial / not crucial … trigger the rerun if
+  the dependency is high."* That pushed us to the better design — and I noticed the schema **already**
+  had the tag (`optional`), so no new planner field was needed. We shipped per-step **criticality**
+  (a failure is structural if it loses the failed step itself or any non-`optional` dependent), which
+  is semantic rather than an arbitrary 0.5 and would have caught the exact run that exposed it. I had
+  the AI revert the half-built threshold (a config knob + scheduler plumbing) before implementing it.
+- **AI proposed swapping the synthesis model; I made it defend the fallback as the real fix.** When a
+  malformed `tool_use_failed` call crashed a run *at synthesis* — losing 7 completed steps — the
+  obvious reflex was "route synthesis to the tool-reliable model." I interrogated that before accepting
+  the AI's fallback idea (*"so why not just replacing it with the gpt?"* and *"how will a deterministic
+  process structure the output well enough?"*). The answers held up: a model swap only **lowers the
+  probability** of one failure mode and can't cover 429/quota/network, and the reliable tier's 8K-TPM
+  free window is too small for the heaviest call. So we built a **deterministic fallback** that
+  assembles a degraded answer from completed steps (writing prose + verbatim code blocks) and a guarded
+  judge, leaving the model choice as an independent dial. Verified live: the next `tool_use_failed` at
+  synthesis produced a `completed_degraded` answer instead of a crash.
+- **The synthesizer silently dropped code from the final answer.** I noticed a code-generation run came
+  back with prose but no code — *"i don't see a code example in the response."* Root cause, not a
+  prompt tweak: the synthesizer's `_render_outputs` read only the agent output's `content` field and
+  ignored the separate `code` field, so the model never saw the code to carry it through. I had the AI
+  fix the renderer to emit the code in a fenced block verbatim (plus a prompt directive to preserve
+  fenced code), with a regression test asserting the code reaches the synthesis prompt.
 
 ## What AI Struggled With
 
+- **Model-intrinsic malformed tool calls it can lower but not eliminate.** Two distinct failure
+  signatures showed up on Groq: Llama emits its **own** tool-call dialect
+  (`<function=Name>{json}</function>`, cramming args into the name slot), and even the
+  function-calling-native GPT-OSS occasionally **leaks a harmony channel token into the tool name**
+  (`web_search<|channel|>commentary`) — both rejected `400 tool_use_failed`. It is sampling-dependent
+  and training-format-rooted, so no prompt removes it and retry-backoff (built for transient errors)
+  doesn't apply to a 400. The AI could *mitigate* it — a tool-reliable tier for bound tools, a
+  temperature-perturbed re-ask, a deterministic fallback at synthesis — but couldn't make a model stop
+  occasionally formatting its calls wrong. The honest posture became defense-in-depth, not a cure.
+- **Per-organization (not per-key) Groq quota it can't see.** When a run exhausted the daily token
+  budget I asked *"if I give a new fresh API token, will it work?"* — it won't: Groq's free-tier
+  TPM/TPD limits are enforced **per organization**, so a fresh key on the same account shares the
+  already-drained pool; only a new account or the daily reset restores quota. As with the Gemini
+  per-day cap below, the AI could route around it (trim research bounds to fit the 8K-TPM window,
+  fall back, wait for reset) but the ceiling is an account fact invisible from the key itself.
 - **External quota/billing limits it can't see.** Because the Gemini free tier caps requests
   per-model-per-day, the eval couldn't fully complete in one sitting (the 5th example,
   the anti-hallucination probe, was a quota casualty rather than a behavioral failure). AI could

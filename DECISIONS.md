@@ -11,7 +11,7 @@
 | --- | --- | --- |
 | Writing Agent (LangGraph reflection loop) | ✅ built + unit-tested + eval'd | `sub_agents/writing/` |
 | Research Agent (`create_agent` autonomous loop) | ✅ built + unit-tested + eval'd | `sub_agents/research/` |
-| Analysis Agent (single structured call) | ✅ built + unit-tested | `sub_agents/analysis/` |
+| Analysis Agent (autonomous `create_agent` reason/compute loop + structured summarization) | ✅ built + unit-tested + eval'd | `sub_agents/analysis/` |
 | Code Agent (two-tier gate: tree-sitter parse + LLM-critic fallback) | ✅ built + unit-tested + eval'd | `sub_agents/code/` |
 | Shared agent contract / retry / token + cost capture | ✅ built | `general_utils/agent_base.py`, `general_utils/` |
 | Planner + DAG validation | ✅ built + unit-tested | `engine/planner.py`, `engine/validation.py` |
@@ -37,7 +37,8 @@ Groq, whose free tier is far larger, became the default while Gemini stays a fir
 generate / explain / debug, all text-producing tasks; **nothing in the spec requires running code**,
 and executing LLM-generated code from an untrusted goal string would be the single largest attack
 surface in the project. So the agent ships with **no sandbox, no tool loop, no execution** — it
-mirrors the Writing agent shape (one structured call → typed `CodeOutput`). Correctness is gated by
+mirrors the Writing agent shape: a bounded **generate → judge → (refine) reflection graph**
+(`StateGraph`, no tools) producing a typed `CodeOutput`. Correctness is gated by
 a **two-tier quality gate** (`sub_agents/code/validation.py`, `agent.py`), the tier chosen per
 language by `has_validator(language)`:
 
@@ -369,6 +370,12 @@ of five forks I pushed the AI through, each tied to a rubric dimension:
    checkpointed, and unit-testable — and `judge → execute` is a normal edge to a sibling. The cheap
    remedy (`resynthesize`) is a tight `judge → synthesize` edge; the expensive one (`replan`) reuses
    the shared `max_replans` budget so neither can loop unbounded.
+
+**Caveat — cancellation is cooperative.** `POST /tasks/{id}/cancel` sets a flag the scheduler checks
+between step launches, so it stops new work and reports completed steps, but does not interrupt a step
+already blocked inside a provider call (e.g. wedged on a `429` backoff) — so a run can briefly report
+`executing` right after a `cancelled` acknowledgement. Preemptive kill (task-per-call + per-step
+timeout) is deferred; see § 5. **(✅ built — `engine/monitor.py`, `engine/scheduler.py`.)**
 
 ---
 
