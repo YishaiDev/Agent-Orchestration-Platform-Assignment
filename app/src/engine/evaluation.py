@@ -37,7 +37,6 @@ def _default_decider_model(cfg: AppConfig) -> BaseChatModel:
     return build_chat_model(
         orchestrator.decider_model_id,
         orchestrator.decider_temperature,
-        cfg.google_api_key.get_secret_value(),
     )
 
 

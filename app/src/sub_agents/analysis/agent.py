@@ -189,7 +189,7 @@ async def run_analysis_agent(
     app_cfg = get_config()
     cfg = app_cfg.analysis_agent
     try:
-        model, summarizer = _resolve_models(app_cfg, cfg, model, summarizer)
+        model, summarizer = _resolve_models(cfg, model, summarizer)
         price = app_cfg.pricing[cfg.model_id]
         ctx = _build_context(action, data, sources or [], step_id, session_id, cfg)
         agent = build_analysis_agent(model, summarizer, cfg, price)
@@ -223,15 +223,13 @@ async def run_analysis_agent(
 
 
 def _resolve_models(
-    app_cfg: Any,
     cfg: AnalysisAgentConfig,
     model: BaseChatModel | None,
     summarizer: BaseChatModel | None,
 ) -> tuple[BaseChatModel, BaseChatModel]:
     """Return the main and summarizer models, building defaults from config when not injected."""
-    api_key = app_cfg.google_api_key.get_secret_value()
-    model = model or build_chat_model(cfg.model_id, cfg.temperature, api_key)
+    model = model or build_chat_model(cfg.model_id, cfg.temperature)
     summarizer = summarizer or build_chat_model(
-        cfg.summarizer_model_id, cfg.summarizer_temperature, api_key
+        cfg.summarizer_model_id, cfg.summarizer_temperature
     )
     return model, summarizer

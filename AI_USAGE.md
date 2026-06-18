@@ -4,9 +4,14 @@
 
 - **Claude Code (Opus 4.8)** — primary pair-programming agent for design, implementation,
   test-harness authoring, refactoring, and keeping `DECISIONS.md` in sync.
-- **Google Gemini** (`gemini-3.5-flash` for the planner, synthesizer, and the four agents;
-  `gemini-2.5-flash` as the cheaper, independent reviewer / summarizer / judge tier — both via
-  LangChain `init_chat_model`, `model_provider="google_genai"`) — the LLMs the platform runs on.
+- **Switchable LLM provider** — a `big`/`small` model tier per role, resolved from
+  `app/llm_config.yml` for whichever `provider:` is active in `app/config.yaml`. **Groq**
+  (`llama-3.3-70b-versatile` big / `llama-3.1-8b-instant` small, `model_provider="groq"`,
+  `GROQ_API_KEY`) is the default because its free tier is far larger than Gemini's, so multi-step
+  runs complete without hitting a daily cap; **Google Gemini** (`gemini-3.5-flash` big /
+  `gemini-2.5-flash` small, `model_provider="google_genai"`, `GOOGLE_API_KEY`) stays fully supported.
+  Both go through LangChain `init_chat_model`; `build_chat_model` picks the provider + key from the
+  active `provider:` in config.
 - **Tavily** — the grounded web-search backend for the Research Agent.
 - **Claude Code `agent-building` skill** — the architecture reference (complexity ladder, pattern
   catalog: Plan-and-Execute, evaluator-optimizer, scatter-gather) I used to ground the

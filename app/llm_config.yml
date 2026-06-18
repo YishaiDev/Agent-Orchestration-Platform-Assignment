@@ -1,0 +1,24 @@
+# LLM model catalog: per-provider tier -> model id, plus USD pricing per 1M tokens.
+# The active provider is chosen in config.yaml (`provider:`). Agents reference a
+# tier (big | small); the id below is resolved at load time.
+providers:
+  groq:
+    # Groq's free tier is far larger than Gemini's (e.g. llama-3.1-8b-instant
+    # ~14,400 req/day, 30 rpm), which is why it is the default — multi-step runs
+    # complete without hitting a daily cap. `big` is the stronger planner/synthesizer
+    # model; `small` is the cheap reviewer/summarizer tier. Keys use GROQ_API_KEY.
+    # `tools` is a tool-calling-reliable model: Llama-on-Groq intermittently emits
+    # malformed tool calls (400 tool_use_failed), so the Research Agent's tool-binding
+    # model uses GPT-OSS (an open-weight model hosted by Groq — still GROQ_API_KEY,
+    # no OpenAI account) which handles Groq function calling reliably. Research bounds
+    # are trimmed (config.yaml) so a step's tokens fit the 8K-TPM free-tier window.
+    tiers: { big: llama-3.3-70b-versatile, small: llama-3.1-8b-instant, tools: openai/gpt-oss-20b }
+    pricing:
+      llama-3.3-70b-versatile: { input: 0.59, output: 0.79 }
+      llama-3.1-8b-instant: { input: 0.05, output: 0.08 }
+      openai/gpt-oss-20b: { input: 0.10, output: 0.50 }
+  gemini:
+    tiers: { big: gemini-3.5-flash, small: gemini-2.5-flash, tools: gemini-2.5-flash }
+    pricing:
+      gemini-3.5-flash: { input: 0.30, output: 2.50 }
+      gemini-2.5-flash: { input: 0.10, output: 0.40 }

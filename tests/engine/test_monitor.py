@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+os.environ.setdefault("GROQ_API_KEY", "test-key")
 
 from app.src.engine.monitor import (  # noqa: E402
     RunMonitor,
@@ -74,11 +75,36 @@ def test_optional_failure_is_skippable() -> None:
     assert classify_failure(plan, "s1", {"s1": StepStatus.FAILED}) == "skippable"
 
 
-def test_localized_required_failure_is_skippable() -> None:
+def test_required_failure_is_structural_even_with_surviving_branch() -> None:
     plan = _branchy_plan()
     status = {"s1": StepStatus.FAILED, "s2": StepStatus.PENDING, "s3": StepStatus.PENDING}
-    assert classify_failure(plan, "s1", status) == "skippable"
+    assert classify_failure(plan, "s1", status) == "structural"
     assert skip_cascade(plan, "s1") == {"s3"}
+
+
+def test_optional_failure_losing_crucial_dependent_is_structural() -> None:
+    plan = _plan(
+        [
+            ExecutionStep(id="s1", agent="research", action="research", optional=True),
+            ExecutionStep(id="s2", agent="analysis", action="analyze", dependencies=["s1"]),
+        ]
+    )
+    status = {"s1": StepStatus.FAILED, "s2": StepStatus.PENDING}
+    assert classify_failure(plan, "s1", status) == "structural"
+
+
+def test_optional_failure_with_optional_dependent_is_skippable() -> None:
+    plan = _plan(
+        [
+            ExecutionStep(id="s1", agent="research", action="research", optional=True),
+            ExecutionStep(
+                id="s2", agent="analysis", action="analyze",
+                dependencies=["s1"], optional=True,
+            ),
+        ]
+    )
+    status = {"s1": StepStatus.FAILED, "s2": StepStatus.PENDING}
+    assert classify_failure(plan, "s1", status) == "skippable"
 
 
 def test_structural_failure_kills_all_remaining() -> None:
@@ -127,7 +153,9 @@ def test_request_cancel_and_skip_marks() -> None:
 def _main() -> None:
     tests = [
         test_optional_failure_is_skippable,
-        test_localized_required_failure_is_skippable,
+        test_required_failure_is_structural_even_with_surviving_branch,
+        test_optional_failure_losing_crucial_dependent_is_structural,
+        test_optional_failure_with_optional_dependent_is_skippable,
         test_structural_failure_kills_all_remaining,
         test_record_result_tracks_trace_totals_progress,
         test_request_replan_stops_launching,

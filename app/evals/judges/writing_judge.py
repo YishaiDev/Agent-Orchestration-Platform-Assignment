@@ -107,11 +107,9 @@ def build_input(example: dict) -> WritingInput:
 
 
 def build_judge_model():
-    """Build the Gemini judge model from config (deterministic)."""
+    """Build the judge model from config (deterministic)."""
     cfg = get_config()
-    return build_chat_model(
-        cfg.writing_agent.judge_model_id, 0.0, cfg.google_api_key.get_secret_value()
-    )
+    return build_chat_model(cfg.writing_agent.judge_model_id, 0.0)
 
 
 def apply_model_override(model_id: str) -> None:

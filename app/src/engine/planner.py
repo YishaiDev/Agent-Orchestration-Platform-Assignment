@@ -34,7 +34,6 @@ def _default_planner_model(cfg: AppConfig) -> BaseChatModel:
     return build_chat_model(
         orchestrator.planner_model_id,
         orchestrator.planner_temperature,
-        cfg.google_api_key.get_secret_value(),
     )
 
 

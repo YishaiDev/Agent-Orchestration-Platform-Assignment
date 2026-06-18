@@ -100,11 +100,9 @@ def load_example(example_id: str, path: Path) -> dict:
 
 
 def build_judge_model():
-    """Build the Gemini judge model from config (deterministic)."""
+    """Build the judge model from config (deterministic)."""
     cfg = get_config()
-    return build_chat_model(
-        cfg.research_agent.model_id, 0.0, cfg.google_api_key.get_secret_value()
-    )
+    return build_chat_model(cfg.research_agent.model_id, 0.0)
 
 
 def _as_text(content: object) -> str:

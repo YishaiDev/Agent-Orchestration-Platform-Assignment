@@ -19,11 +19,13 @@ from app.src.engine.monitor import RunMonitor
 from app.src.general_utils.agent_base import AgentResult, invoke_structured
 from app.src.general_utils.llm import build_chat_model
 from app.src.schemas.config import AppConfig, get_config
-from app.src.schemas.plan import ExecutionPlan, StepStatus
+from app.src.schemas.plan import ExecutionPlan, ExecutionStep, StepStatus
 from app.src.schemas.run_state import FinalResult, ProvenanceEntry
 
 _OUTPUT_CHARS = 1200
 _LOST_STATES = {StepStatus.SKIPPED, StepStatus.CANCELLED}
+_FALLBACK_PREAMBLE = "[Auto-assembled from completed steps; the synthesis step was unavailable.]"
+_FALLBACK_CONFIDENCE = 0.3
 
 
 class Synthesis(BaseModel):
@@ -39,24 +41,75 @@ def _default_synth_model(cfg: AppConfig) -> BaseChatModel:
     return build_chat_model(
         orchestrator.synthesizer_model_id,
         orchestrator.synthesizer_temperature,
-        cfg.google_api_key.get_secret_value(),
     )
+
+
+def _render_block(step: ExecutionStep, result: AgentResult) -> str:
+    """Render one completed step as a confidence-tagged block, preserving any code verbatim."""
+    confidence = result.output.get("confidence")
+    text = result.output.get("content") or json.dumps(result.output, default=str)
+    block = (
+        f"[{step.id} | {result.agent}/{step.action} | confidence={confidence}] "
+        f"{str(text)[:_OUTPUT_CHARS]}"
+    )
+    code = result.output.get("code")
+    if not code:
+        return block
+    language = result.output.get("language") or ""
+    return f"{block}\n```{language}\n{code}\n```"
 
 
 def _render_outputs(plan: ExecutionPlan, results: dict[str, AgentResult]) -> str:
     """Render completed, confidence-tagged outputs for the synthesis prompt."""
+    blocks = [
+        _render_block(step, result)
+        for step in plan.steps
+        if (result := results.get(step.id)) is not None and result.status == "completed"
+    ]
+    return "\n\n".join(blocks)
+
+
+def _writing_content(plan: ExecutionPlan, results: dict[str, AgentResult]) -> str:
+    """Return the writing agent's content if a writing step completed, else an empty string."""
+    for step in plan.steps:
+        result = results.get(step.id)
+        if result is not None and result.status == "completed" and result.agent == "writing":
+            return str(result.output.get("content") or "")
+    return ""
+
+
+def _all_code_blocks(plan: ExecutionPlan, results: dict[str, AgentResult]) -> str:
+    """Render every completed code-bearing step as a fenced block, verbatim."""
     blocks = []
     for step in plan.steps:
         result = results.get(step.id)
-        if result is None or result.status != "completed":
+        if result is None or result.status != "completed" or not result.output.get("code"):
             continue
-        confidence = result.output.get("confidence")
-        text = result.output.get("content") or json.dumps(result.output, default=str)
-        blocks.append(
-            f"[{step.id} | {result.agent}/{step.action} | confidence={confidence}] "
-            f"{str(text)[:_OUTPUT_CHARS]}"
-        )
+        language = result.output.get("language") or ""
+        blocks.append(f"```{language}\n{result.output['code']}\n```")
     return "\n\n".join(blocks)
+
+
+def fallback_synthesis(plan: ExecutionPlan, results: dict[str, AgentResult]) -> Synthesis:
+    """Deterministic best-effort answer used when the synthesizer LLM call fails terminally.
+
+    Leads with the writing agent's already-coherent prose when present (appending code blocks the
+    prose omits), and otherwise stitches all completed outputs (which already carry code fences).
+    Confidence is held low and calibrated down later, so a fallback never claims full confidence.
+
+    Args:
+        plan: The executed plan.
+        results: Completed results keyed by step id.
+
+    Returns:
+        A low-confidence Synthesis assembled without any model call.
+    """
+    lead = _writing_content(plan, results)
+    parts = [_FALLBACK_PREAMBLE, lead, _all_code_blocks(plan, results)] if lead else [
+        _FALLBACK_PREAMBLE,
+        _render_outputs(plan, results),
+    ]
+    return Synthesis(content="\n\n".join(p for p in parts if p), confidence=_FALLBACK_CONFIDENCE)
 
 
 async def synthesize(

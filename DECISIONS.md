@@ -23,6 +23,16 @@
 | LangGraph outer loop (plan→execute→evaluate→synthesize→judge) | ✅ built + unit-tested | `engine/graph.py`, `engine/nodes.py` |
 | API (6 endpoints) + entry points | ✅ built + unit-tested | `api/`, `main.py`, `cli.py` |
 
+**Switchable LLM provider (Groq / Gemini), tier-based config.** ✅ The platform runs on either
+**Groq** (default) or **Google Gemini**, selected by one line — `provider:` in `config.yaml`.
+Model ids and pricing for both providers live in `llm_config.yml`, keyed by a `big`/`small` tier;
+each agent role references a tier, so switching provider is a single edit that never touches agent
+code. `general_utils/llm.py::build_chat_model` selects the provider and API key from the active
+`provider:` in config (`groq` → `groq` / `GROQ_API_KEY`, `gemini` → `google_genai` /
+`GOOGLE_API_KEY`). **Driven by a real failure:** Gemini's free tier rate-limited (429) multi-step
+runs (see the retry note below) — its ~20-requests/day cap dies on a single multi-step task — so
+Groq, whose free tier is far larger, became the default while Gemini stays a first-class option.
+
 **Code Agent — verification without execution (two-tier gate).** The spec's Code Agent does
 generate / explain / debug, all text-producing tasks; **nothing in the spec requires running code**,
 and executing LLM-generated code from an untrusted goal string would be the single largest attack
@@ -187,9 +197,10 @@ classification in `engine/monitor.py`, cancellation in `engine/scheduler.py`.)**
 (transient errors — bounded backoff, already at the agent layer); (2) **skip + continue** (a failed
 step marks only its dependents `skipped`; independent branches survive); (3) **partial result** (a
 non-critical branch is lost — the synthesizer reports the omission honestly); (4) **partial or failed
-task** (a *load-bearing* step fails and its skip-cascade kills **every** non-`optional` step — this is
-classified `structural`; criticality is computed from a per-step `optional` flag plus the dependency
-graph, not an undefined "sink"); (5) **bounded re-plan** (the failure is `structural` and re-planning
+task** (a *load-bearing* step fails — it is itself non-`optional`, or its skip-cascade strips a
+non-`optional` dependent — so *crucial* work is lost and the failure is classified `structural`;
+criticality is read from a per-step `optional` flag plus the dependency graph, not an undefined
+"sink"); (5) **bounded re-plan** (the failure is `structural` and re-planning
 is still allowed; the merge protocol freezes completed steps, namespaces new ids under an `r{n}_`
 prefix, and re-validates the merged DAG). Rungs 1–4 keep the planner static and the engine
 deterministic; only rung 5 re-invokes the LLM, and it is capped by `max_replans` (default 1). Final
@@ -203,9 +214,10 @@ unit-tested across `tests/engine/test_scheduler.py`, `test_monitor.py`, `test_ev
 re-plan*.** The same cost-aware principle as the agents — a free deterministic check first, an LLM
 call only where it changes a decision — but at the orchestrator the deterministic pre-filter is a
 **structural classification, not a confidence threshold**. When a step fails, the Monitor classifies
-it (`engine/monitor.py::classify_failure`): it is **skippable** when independent non-`optional` work
-survives its skip-cascade (mark the branch skipped, let healthy branches keep running, no LLM call),
-and **structural** when the cascade removes *every* remaining non-`optional` step. Only a `structural`
+it (`engine/monitor.py::classify_failure`): it is **structural** when the failure loses *crucial*
+work — the failed step is itself non-`optional`, or its skip-cascade strips a non-`optional`
+dependent — and **skippable** only when the loss is confined to `optional` steps (mark the branch
+skipped, let healthy branches keep running, no LLM call). Only a `structural`
 failure consults the LLM **re-plan decider** (`engine/evaluation.py::decide_replan`), one bounded call
 given **the whole current plan, which steps finished and their outputs, and the failed step + its
 error**, that returns `continue` (the goal is still reachable from what completed) or `replan` (revised
@@ -214,6 +226,56 @@ LLM at exactly one bounded decision point, and never exhausts the Gemini free ti
 the way a judge-after-every-step would. Offline LLM-as-judge stays in `evals/` for regression, separate
 from this online control path. **(✅ built + unit-tested, `tests/engine/test_monitor.py`,
 `test_evaluation.py`.)**
+
+**Design journey (criticality, driven by a live failure).** The classifier originally returned
+`skippable` whenever *any* non-`optional` step survived the cascade. A live robustness run exposed the
+flaw: a research step the planner had made load-bearing failed, its cascade skipped 4 of the remaining
+5 steps, but one independent branch survived — so the binary "any survivor?" test said `skippable` and
+**suppressed the re-plan**, returning a thin 1-of-6-step partial. **Option A — a numeric
+loss-threshold** (escalate to `structural` when the cascade removes ≥ X% of remaining non-`optional`
+steps): rejected as semantically blind — an arbitrary `0.5` knob treats every step as equal weight and
+cannot tell "lost 1 crucial step of 6" from "lost 1 optional step of 2". **Option B — per-step
+criticality** (chosen): a failure is `structural` when it loses crucial work — the failed step is
+non-`optional`, or its cascade strips a non-`optional` dependent. No magic number, and it reuses the
+`optional` flag the schema **already** carries (no new planner field to mis-tag); the heuristic only
+decides *whether to consult* the decider, which still makes the final continue-vs-replan call.
+**(✅ built — `engine/monitor.py::classify_failure`; unit-tested `tests/engine/test_monitor.py` —
+required-failure-with-surviving-branch → `structural`, optional-failure-losing-a-crucial-dependent →
+`structural`, optional-only loss → `skippable`.)**
+
+**Synthesis never crashes the run — a deterministic fallback under the LLM judge.** Both LLM calls in
+the synthesize→judge tail can fail terminally (a malformed structured-output call rejected `400
+tool_use_failed`, a daily-quota `429`, a network drop), and before this fix such a raw failure
+propagated out of the node and **crashed the whole run, discarding every completed step**. The outer
+loop now extends the agents' "never raise" guarantee to itself: `synthesize_node` wraps the call and,
+on any exception, assembles a **deterministic best-effort answer** from the completed step outputs
+(`engine/synthesizer.py::fallback_synthesis` — leads with the Writing agent's already-coherent prose
+when present, appends every completed code block verbatim, else stitches the rendered outputs) and
+flags `synth_failed`; `judge_node` then short-circuits to `accept` as `completed_degraded` (and its own
+call is guarded the same way). Confidence is held low and calibrated down, so a fallback never claims
+full confidence. The model swap was considered and rejected as *the* fix: routing synthesis to the
+function-calling-reliable `tools` tier only **lowers the probability** of one failure mode and can't
+cover `429`/quota/network, and that tier's 8K-TPM free window is too small for synthesis (the heaviest
+call); the fallback covers the whole failure class for zero tokens, with the model choice left as an
+independent dial. **(✅ built — `engine/synthesizer.py::fallback_synthesis`,
+`engine/nodes.py::{synthesize_node,judge_node}`; unit-tested `tests/engine/test_graph.py` —
+synthesis-call failure → `completed_degraded` with non-empty content incl. code, judge-call failure →
+accepts the draft degraded; both with no exception. Confirmed live: a run that hit `tool_use_failed`
+at synthesis returned a degraded answer instead of crashing.)**
+
+**Research re-asks a malformed tool call instead of failing the step.** The provider intermittently
+rejects a tool call with `400 tool_use_failed` — Llama emits its own `<function=…>{json}` dialect, and
+even the `tools`-tier GPT-OSS occasionally **leaks a harmony channel token into the tool name**
+(`web_search<|channel|>commentary`). It is sampling-dependent, so the model-call backoff (§ retry
+logic) can't help — a `400` is not transient. The Research agent now wraps just the agent loop in a
+**bounded re-ask** (`sub_agents/research/agent.py::_invoke_with_tool_retry`): on a `tool_use_failed`
+it rebuilds the model with a **bumped temperature** and a fresh context and retries
+(`tool_retry_attempts`/`tool_retry_temp_bump` in `config.yaml`). The perturbation is the point —
+research runs at temperature 0, so a plain retry would re-sample the identical bad call; nudging
+temperature lets a well-formed call emerge. After the budget the broad `except` still degrades to a
+clean `failed` `AgentResult` (never a crash), and a research-step failure is now recoverable by the
+criticality re-plan above. **(✅ built — `sub_agents/research/agent.py`; unit-tested
+`tests/sub_agents/test_research_agent.py` — fail-once → recovers, always-fail → bounded `failed`.)**
 
 **Monitoring (Observability dimension).** The Monitor is the platform's context bus and the spec's
 required monitoring surface: a per-step **execution trace** (agent, action, in/out, status,

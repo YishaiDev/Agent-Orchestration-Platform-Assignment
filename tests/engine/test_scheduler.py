@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+os.environ.setdefault("GROQ_API_KEY", "test-key")
 
 from app.src.engine.monitor import RunMonitor  # noqa: E402
 from app.src.engine.scheduler import execute_plan  # noqa: E402
@@ -117,9 +118,12 @@ def test_independent_steps_run_in_parallel() -> None:
 def test_skippable_failure_skips_dependents_siblings_survive() -> None:
     plan = _plan(
         [
-            _step("s1"),
+            _step("s1", optional=True),
             _step("s2"),
-            _step("s3", agent="analysis", action="analyze", dependencies=["s1"]),
+            _step(
+                "s3", agent="analysis", action="analyze",
+                dependencies=["s1"], optional=True,
+            ),
         ]
     )
     monitor = _run(plan, FakeRunner(fails={"s1"}))

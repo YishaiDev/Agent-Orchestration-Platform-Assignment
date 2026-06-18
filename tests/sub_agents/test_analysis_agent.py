@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+os.environ.setdefault("GROQ_API_KEY", "test-key")
 
 from app.src.general_utils.cost import token_cost  # noqa: E402
 from app.src.schemas.config import AnalysisAgentConfig, ModelPrice, get_config  # noqa: E402
@@ -258,7 +259,8 @@ def test_result_matches_spec_output_format() -> None:
     assert set(payload["output"]) == {"content", "findings", "confidence", "sources"}
     assert payload["output"]["sources"] == ["upstream://research/1"]
     assert isinstance(payload["output"]["findings"], list)
-    main_price = get_config().pricing["gemini-3.5-flash"]
+    cfg = get_config()
+    main_price = cfg.pricing[cfg.analysis_agent.model_id]
     expected = token_cost(main_price, 200, 50) * 2 + token_cost(main_price, 100, 40)
     assert payload["actual_cost_usd"] == round(expected, 6)
 

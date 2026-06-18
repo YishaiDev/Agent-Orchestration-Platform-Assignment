@@ -1,23 +1,29 @@
+# Which LLM provider to use. Model ids + pricing per tier live in llm_config.yml.
+# Switch the whole platform between providers by changing this one line.
+provider: groq          # groq | gemini
+
 writing_agent:
-  model: { id: gemini-3.5-flash, temperature: 0.4 }
-  judge_model: { id: gemini-3.5-flash, temperature: 0.0 }
+  model: { tier: big, temperature: 0.4 }
+  judge_model: { tier: big, temperature: 0.0 }
   default_max_words: 1500
   enforce_word_limit: true
   max_revisions: 2
 
 research_agent:
-  model: { id: gemini-3.5-flash, temperature: 0.0 }
-  summarizer_model: { id: gemini-2.5-flash, temperature: 0.0 }
-  max_search_calls: 5
-  recursion_limit: 12
-  search_top_k: 5
-  summarization: { trigger_messages: 16, keep_recent: 6 }
+  model: { tier: tools, temperature: 0.0 }
+  summarizer_model: { tier: big, temperature: 0.0 }
+  max_search_calls: 3
+  recursion_limit: 6
+  search_top_k: 3
+  summarization: { trigger_messages: 8, keep_recent: 4 }
   caching: { llm_cache: memory, tavily_ttl_seconds: 3600 }
   avg_output_tokens: 350
+  tool_retry_attempts: 2
+  tool_retry_temp_bump: 0.3
 
 analysis_agent:
-  model: { id: gemini-3.5-flash, temperature: 0.2 }
-  summarizer_model: { id: gemini-2.5-flash, temperature: 0.0 }
+  model: { tier: big, temperature: 0.2 }
+  summarizer_model: { tier: big, temperature: 0.0 }
   recursion_limit: 10
   max_compute_calls: 6
   confidence_threshold: 0.5
@@ -25,18 +31,18 @@ analysis_agent:
   avg_output_tokens: 400
 
 code_agent:
-  model: { id: gemini-3.5-flash, temperature: 0.2 }
-  review_model: { id: gemini-2.5-flash, temperature: 0.0 }
+  model: { tier: big, temperature: 0.2 }
+  review_model: { tier: small, temperature: 0.0 }
   default_language: python
   max_syntax_retries: 4
   max_review_retries: 1
   avg_output_tokens: 450
 
 orchestrator:
-  planner_model: { id: gemini-3.5-flash, temperature: 0.2 }
-  decider_model: { id: gemini-3.5-flash, temperature: 0.0 }
-  synthesizer_model: { id: gemini-3.5-flash, temperature: 0.3 }
-  judge_model: { id: gemini-3.5-flash, temperature: 0.0 }
+  planner_model: { tier: big, temperature: 0.2 }
+  decider_model: { tier: big, temperature: 0.0 }
+  synthesizer_model: { tier: big, temperature: 0.3 }
+  judge_model: { tier: big, temperature: 0.0 }
   bounds:
     max_replans: 1
     max_resynth: 2
@@ -45,7 +51,3 @@ orchestrator:
     step_timeout_seconds: 120
     planner_max_attempts: 2
     context_char_budget: 6000
-
-pricing:
-  gemini-3.5-flash: { input: 0.30, output: 2.50 }
-  gemini-2.5-flash: { input: 0.10, output: 0.40 }

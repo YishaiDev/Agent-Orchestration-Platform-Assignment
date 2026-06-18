@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+os.environ.setdefault("GROQ_API_KEY", "test-key")
 
 from app.src.engine.registry import (  # noqa: E402
     agent_names,

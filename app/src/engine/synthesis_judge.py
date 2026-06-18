@@ -32,7 +32,6 @@ def _default_judge_model(cfg: AppConfig) -> BaseChatModel:
     return build_chat_model(
         orchestrator.judge_model_id,
         orchestrator.judge_temperature,
-        cfg.google_api_key.get_secret_value(),
     )
 
 

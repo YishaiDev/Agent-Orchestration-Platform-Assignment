@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+os.environ.setdefault("GROQ_API_KEY", "test-key")
 
 from app.src.general_utils.cost import token_cost  # noqa: E402
 from app.src.schemas.config import ModelPrice, ResearchAgentConfig, get_config  # noqa: E402
@@ -123,6 +124,69 @@ class CountingSearcher:
         if self._delay:
             await asyncio.sleep(self._delay)
         return self._hits[:top_k]
+
+
+class _ScriptedAgent:
+    """Fake compiled agent: raises ``tool_use_failed`` on leading ainvokes, then succeeds.
+
+    ``fail_until`` is the count of initial calls that raise; ``-1`` always raises.
+    """
+
+    def __init__(self, sink: dict, fail_until: int) -> None:
+        self._sink = sink
+        self._fail_until = fail_until
+
+    async def ainvoke(self, _state: object, context: object = None, **kwargs: object) -> dict:
+        self._sink["calls"] += 1
+        if self._fail_until < 0 or self._sink["calls"] <= self._fail_until:
+            raise RuntimeError(
+                "Error code: 400 - {'error': {'code': 'tool_use_failed', "
+                "'message': 'attempted to call tool web_search<|channel|>commentary'}}"
+            )
+        return {"messages": [_final_msg()]}
+
+
+def _run_with_flaky_agent(fail_until: int, sink: dict) -> object:
+    """Run the agent with ``build_research_agent`` patched to a fail-then-recover fake agent."""
+    import app.src.sub_agents.research.agent as agent_mod
+
+    def _fake_build(
+        model: object, summarizer: object, cfg: object, price: object
+    ) -> _ScriptedAgent:
+        sink["builds"] += 1
+        return _ScriptedAgent(sink, fail_until)
+
+    def _fake_chat(*args: object, **kwargs: object) -> ScriptedModel:
+        return ScriptedModel(responses=[_final_msg()])
+
+    orig_build, orig_chat = agent_mod.build_research_agent, agent_mod.build_chat_model
+    agent_mod.build_research_agent = _fake_build  # type: ignore[assignment]
+    agent_mod.build_chat_model = _fake_chat  # type: ignore[assignment]
+    try:
+        return asyncio.run(
+            run_research_agent(
+                "robust subtopic", step_id="step-retry",
+                searcher=CountingSearcher(), model=None, summarizer=FakeSummarizer(),
+            )
+        )
+    finally:
+        agent_mod.build_research_agent = orig_build  # type: ignore[assignment]
+        agent_mod.build_chat_model = orig_chat  # type: ignore[assignment]
+
+
+def test_research_reasks_and_recovers_on_malformed_tool_call() -> None:
+    sink = {"calls": 0, "builds": 0}
+    result = _run_with_flaky_agent(fail_until=1, sink=sink)
+    assert result.status == "completed"  # type: ignore[attr-defined]
+    assert sink["builds"] == 2
+
+
+def test_research_gives_up_after_exhausting_retries() -> None:
+    sink = {"calls": 0, "builds": 0}
+    result = _run_with_flaky_agent(fail_until=-1, sink=sink)
+    assert result.status == "failed"  # type: ignore[attr-defined]
+    assert "tool_use_failed" in result.output["error"]  # type: ignore[attr-defined]
+    assert sink["builds"] == get_config().research_agent.tool_retry_attempts + 1
 
 
 def _cfg(**overrides: object) -> ResearchAgentConfig:
@@ -229,7 +293,8 @@ def test_tavily_key_and_runtime_absent_from_tool_schema() -> None:
 
 def test_actual_cost_matches_price_table() -> None:
     result = asyncio.run(_run_full(step_id="step-cost"))
-    main = get_config().pricing["gemini-3.5-flash"]
+    cfg = get_config()
+    main = cfg.pricing[cfg.research_agent.model_id]
     expected = token_cost(main, 400, 100) + token_cost(main, 100, 40)
     assert result.actual_cost_usd == round(expected, 6)
     assert result.tokens_used == 500 + 140
@@ -299,6 +364,8 @@ def _main() -> None:
         test_actual_cost_matches_price_table,
         test_two_research_calls_run_concurrently,
         test_result_matches_spec_output_format,
+        test_research_reasks_and_recovers_on_malformed_tool_call,
+        test_research_gives_up_after_exhausting_retries,
     ]
     for test in tests:
         test()

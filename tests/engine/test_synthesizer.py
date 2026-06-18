@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+os.environ.setdefault("GROQ_API_KEY", "test-key")
 
 from app.src.engine.monitor import RunMonitor  # noqa: E402
 from app.src.engine.synthesizer import (  # noqa: E402
@@ -92,6 +93,22 @@ def test_synthesize_returns_structured_content() -> None:
     assert "<goal>" in user and "<outputs>" in user
 
 
+def test_code_output_rendered_verbatim_into_prompt() -> None:
+    model = FakeModel(Synthesis(content="ans", confidence=0.9))
+    code = "import asyncio\n\nasync def main():\n    await asyncio.sleep(1)"
+    results = {
+        "s1": AgentResult(
+            step_id="s1", agent="code", status="completed",
+            output={"content": "explanation", "code": code, "language": "python"},
+            tokens_used=3, execution_time_ms=5,
+        )
+    }
+    asyncio.run(synthesize("write asyncio code", _plan(), results, model=model))
+    user = model.seen[1]["content"]
+    assert "```python" in user
+    assert "async def main()" in user
+
+
 def test_build_final_result_assembles_provenance_and_totals() -> None:
     monitor = RunMonitor("t1")
     plan = _plan()
@@ -121,6 +138,7 @@ def test_skipped_steps_listed() -> None:
 def _main() -> None:
     tests = [
         test_synthesize_returns_structured_content,
+        test_code_output_rendered_verbatim_into_prompt,
         test_build_final_result_assembles_provenance_and_totals,
         test_skipped_steps_listed,
     ]

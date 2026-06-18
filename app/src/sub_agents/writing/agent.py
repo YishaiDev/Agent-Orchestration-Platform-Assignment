@@ -132,14 +132,8 @@ def run_writing_agent(inp: WritingInput, step_id: str = "writing") -> AgentResul
     started = time.perf_counter()
     try:
         cfg = get_config().writing_agent
-        writer = build_chat_model(
-            cfg.model_id, cfg.temperature, get_config().google_api_key.get_secret_value()
-        )
-        judge = build_chat_model(
-            cfg.judge_model_id,
-            cfg.judge_temperature,
-            get_config().google_api_key.get_secret_value(),
-        )
+        writer = build_chat_model(cfg.model_id, cfg.temperature)
+        judge = build_chat_model(cfg.judge_model_id, cfg.judge_temperature)
         graph = build_writing_graph(writer, judge, cfg.max_revisions)
         max_words = _resolve_max_words(inp, cfg.default_max_words)
         final = cast(WritingState, graph.invoke(initial_state(inp, max_words)))

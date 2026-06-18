@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+os.environ.setdefault("GROQ_API_KEY", "test-key")
 
 from app.src.engine.graph import run_task  # noqa: E402
 from app.src.engine.nodes import EngineDeps  # noqa: E402
@@ -230,6 +231,69 @@ def test_resynthesize_budget_exhausted_degrades() -> None:
     assert state["final_result"]["status"] == "completed_degraded"
 
 
+class _CodeRunner(FakeRunner):
+    async def __call__(self, step: ExecutionStep, results: dict, session: str) -> AgentResult:
+        self.ran.append(step.id)
+        return AgentResult(
+            step_id=step.id, agent=step.agent, status="completed",
+            output={"content": f"out-{step.id}", "code": "print('hi')",
+                    "language": "python", "confidence": 0.9},
+            tokens_used=1, execution_time_ms=1,
+        )
+
+
+def test_synthesis_failure_falls_back_to_degraded() -> None:
+    import app.src.engine.nodes as nodes_mod
+
+    async def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("tool_use_failed: malformed function call")
+
+    model = ScriptedModel(
+        {
+            "PlannerDraft": [PlannerDraft(reasoning="code it",
+                steps=[ExecutionStep(id="s1", agent="code", action="generate")])],
+            "SynthesisVerdict": [_accept_verdict()],
+        }
+    )
+    registry = RunRegistry()
+    deps = EngineDeps(registry=registry, runner=_CodeRunner(), planner_model=model,
+                      decider_model=model, synth_model=model, judge_model=model, concurrency=3)
+    original = nodes_mod.synthesize
+    nodes_mod.synthesize = _boom  # type: ignore[assignment]
+    try:
+        state = _run(deps, max_replans=1)
+    finally:
+        nodes_mod.synthesize = original  # type: ignore[assignment]
+    assert state["final_result"]["status"] == "completed_degraded"
+    assert state["synth_failed"] is True
+    assert "```python" in state["final_output"] and "print('hi')" in state["final_output"]
+
+
+def test_judge_failure_accepts_degraded() -> None:
+    import app.src.engine.nodes as nodes_mod
+
+    async def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("tool_use_failed")
+
+    model = ScriptedModel(
+        {
+            "PlannerDraft": [_two_step_draft()],
+            "Synthesis": [Synthesis(content="real synthesis", confidence=0.9)],
+        }
+    )
+    registry = RunRegistry()
+    deps = EngineDeps(registry=registry, runner=FakeRunner(), planner_model=model,
+                      decider_model=model, synth_model=model, judge_model=model, concurrency=3)
+    original = nodes_mod.judge_synthesis
+    nodes_mod.judge_synthesis = _boom  # type: ignore[assignment]
+    try:
+        state = _run(deps, max_replans=1)
+    finally:
+        nodes_mod.judge_synthesis = original  # type: ignore[assignment]
+    assert state["final_result"]["status"] == "completed_degraded"
+    assert state["final_output"] == "real synthesis"
+
+
 def _main() -> None:
     tests = [
         test_happy_path_completes,
@@ -238,6 +302,8 @@ def _main() -> None:
         test_resynthesize_loop_then_accepts,
         test_judge_replan_loops_through_execute,
         test_resynthesize_budget_exhausted_degrades,
+        test_synthesis_failure_falls_back_to_degraded,
+        test_judge_failure_accepts_degraded,
     ]
     for test in tests:
         test()

@@ -150,14 +150,13 @@ def _max_rounds(cfg: CodeAgentConfig, parser_path: bool) -> int:
 
 
 def _resolve_models(
-    app_cfg: Any, cfg: CodeAgentConfig, model: BaseChatModel | None
+    cfg: CodeAgentConfig, model: BaseChatModel | None
 ) -> tuple[BaseChatModel, BaseChatModel]:
     """Return (generator, corrector) models; an injected model is reused for both (tests)."""
     if model is not None:
         return model, model
-    api_key = app_cfg.google_api_key.get_secret_value()
-    generator = build_chat_model(cfg.model_id, cfg.temperature, api_key)
-    corrector = build_chat_model(cfg.review_model_id, cfg.review_temperature, api_key)
+    generator = build_chat_model(cfg.model_id, cfg.temperature)
+    corrector = build_chat_model(cfg.review_model_id, cfg.review_temperature)
     return generator, corrector
 
 
@@ -193,7 +192,7 @@ async def run_code_agent(
     app_cfg = get_config()
     cfg = app_cfg.code_agent
     try:
-        generator, corrector = _resolve_models(app_cfg, cfg, model)
+        generator, corrector = _resolve_models(cfg, model)
         gen_price, rev_price = app_cfg.pricing[cfg.model_id], app_cfg.pricing[cfg.review_model_id]
         inp = _build_input(action, task_input, language or cfg.default_language, upstream_context)
         parser_path = has_validator(inp.language)

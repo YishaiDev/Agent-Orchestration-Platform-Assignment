@@ -84,7 +84,13 @@ def skip_cascade(plan: ExecutionPlan, failed_id: str) -> set[str]:
 def classify_failure(
     plan: ExecutionPlan, failed_id: str, step_status: dict[str, StepStatus]
 ) -> str:
-    """Classify a failed step as ``skippable`` or ``structural``.
+    """Classify a failed step as ``skippable`` or ``structural`` by criticality.
+
+    A failure is ``structural`` (consulting the bounded re-plan decider) when it loses crucial work:
+    either the failed step itself is non-optional, or its skip-cascade strips a non-optional
+    dependent that had not already been lost. A failure that only loses optional work is
+    ``skippable`` and the run continues without re-planning. The decider makes the final
+    continue-vs-replan call; this heuristic only decides whether to consult it.
 
     Args:
         plan: The current plan.
@@ -92,18 +98,18 @@ def classify_failure(
         step_status: Live status per step id.
 
     Returns:
-        ``skippable`` when non-optional work survives the failure; ``structural`` otherwise.
+        ``structural`` when crucial (non-optional) work is lost; ``skippable`` otherwise.
     """
     step = plan.step_by_id(failed_id)
-    if step is not None and step.optional:
-        return "skippable"
-    cascade = {failed_id} | skip_cascade(plan, failed_id)
-    survivors = [
-        s
+    if step is not None and not step.optional:
+        return "structural"
+    dependents = skip_cascade(plan, failed_id)
+    lost_crucial = any(
+        not s.optional and step_status.get(s.id) not in _TERMINAL_LOST
         for s in plan.steps
-        if s.id not in cascade and not s.optional and step_status.get(s.id) not in _TERMINAL_LOST
-    ]
-    return "skippable" if survivors else "structural"
+        if s.id in dependents
+    )
+    return "structural" if lost_crucial else "skippable"
 
 
 def _now() -> datetime:

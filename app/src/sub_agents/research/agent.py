@@ -7,7 +7,10 @@ with grounded sources and pre/post cost figures.
 
 from __future__ import annotations
 
+import logging
 import time
+from collections.abc import Callable
+from functools import partial
 from typing import Any, cast
 
 from langchain.agents import create_agent
@@ -16,7 +19,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langgraph.graph.state import CompiledStateGraph
 
-from app.src.general_utils.agent_base import AgentResult, extract_tokens
+from app.src.general_utils.agent_base import AgentResult, Messages, extract_tokens
 from app.src.general_utils.cost import estimate_cost, token_cost
 from app.src.general_utils.llm import build_chat_model
 from app.src.general_utils.middleware import (
@@ -33,6 +36,9 @@ from app.src.sub_agents.research.tools import web_search
 
 AGENT_NAME = "research"
 _LOW_CONFIDENCE_CAP = 0.3
+_TOOL_USE_FAILED = "tool_use_failed"
+
+logger = logging.getLogger("app.sub_agents.research")
 
 
 def build_research_agent(
@@ -138,6 +144,57 @@ def _build_context(
     )
 
 
+def _is_tool_use_failed(exc: Exception) -> bool:
+    """True when an exception is the provider's malformed-tool-call rejection (worth re-asking)."""
+    return _TOOL_USE_FAILED in str(exc)
+
+
+def _attempt_model(
+    cfg: ResearchAgentConfig, injected: BaseChatModel | None, attempt: int
+) -> BaseChatModel:
+    """Return the model for one attempt: the injected one, or a config model whose temperature is
+    bumped on retries so a near-greedy loop re-samples a different (well-formed) tool call."""
+    if injected is not None:
+        return injected
+    temperature = min(1.0, cfg.temperature + cfg.tool_retry_temp_bump * attempt)
+    return build_chat_model(cfg.model_id, temperature)
+
+
+async def _invoke_with_tool_retry(
+    cfg: ResearchAgentConfig,
+    injected_model: BaseChatModel | None,
+    summarizer: BaseChatModel,
+    price: ModelPrice,
+    initial: Messages,
+    ctx_factory: Callable[[], ResearchContext],
+) -> tuple[dict[str, Any], ResearchContext]:
+    """Run the agent loop, re-asking on a malformed tool call.
+
+    The provider intermittently rejects a channel-token-leaked tool call with ``tool_use_failed``.
+    Each retry rebuilds the model with a perturbed temperature and a fresh context so a clean call
+    can be re-sampled. An injected model (tests) is never rebuilt and never retried.
+    """
+    last_exc: Exception | None = None
+    last_attempt = cfg.tool_retry_attempts
+    for attempt in range(last_attempt + 1):
+        ctx = ctx_factory()
+        model = _attempt_model(cfg, injected_model, attempt)
+        agent = build_research_agent(model, summarizer, cfg, price)
+        try:
+            final = await agent.ainvoke({"messages": initial}, context=ctx)  # type: ignore[call-overload]
+            return cast(dict[str, Any], final), ctx
+        except Exception as exc:
+            last_exc = exc
+            exhausted = attempt == last_attempt
+            if injected_model is not None or not _is_tool_use_failed(exc) or exhausted:
+                raise
+            logger.warning(
+                "research tool call malformed for step %s (attempt %d/%d); re-asking",
+                ctx.step_id, attempt + 1, cfg.tool_retry_attempts + 1,
+            )
+    raise cast(Exception, last_exc)
+
+
 async def run_research_agent(
     subtopic: str,
     step_id: str = "research",
@@ -163,18 +220,18 @@ async def run_research_agent(
     app_cfg = get_config()
     cfg = app_cfg.research_agent
     try:
-        model, summarizer = _resolve_models(app_cfg, cfg, model, summarizer)
+        summarizer = summarizer or build_chat_model(
+            cfg.summarizer_model_id, cfg.summarizer_temperature
+        )
         searcher = searcher or TavilySearch(
             app_cfg.tavily_api_key.get_secret_value() if app_cfg.tavily_api_key else "",
             cfg.tavily_ttl_seconds,
         )
         price = app_cfg.pricing[cfg.model_id]
-        ctx = _build_context(subtopic, step_id, session_id, searcher, cfg)
-        agent = build_research_agent(model, summarizer, cfg, price)
         initial = prompts.initial_messages(subtopic)
-        final = await agent.ainvoke(
-            {"messages": initial},
-            context=ctx,  # type: ignore[call-overload]
+        ctx_factory = partial(_build_context, subtopic, step_id, session_id, searcher, cfg)
+        final, ctx = await _invoke_with_tool_retry(
+            cfg, model, summarizer, price, initial, ctx_factory
         )
         findings = _transcript(final["messages"])
         summary, summary_tokens, summary_cost = await _summarize(
@@ -194,18 +251,3 @@ async def run_research_agent(
             tokens_used=0,
             execution_time_ms=elapsed_ms,
         )
-
-
-def _resolve_models(
-    app_cfg: Any,
-    cfg: ResearchAgentConfig,
-    model: BaseChatModel | None,
-    summarizer: BaseChatModel | None,
-) -> tuple[BaseChatModel, BaseChatModel]:
-    """Return the main and summarizer models, building defaults from config when not injected."""
-    api_key = app_cfg.google_api_key.get_secret_value()
-    model = model or build_chat_model(cfg.model_id, cfg.temperature, api_key)
-    summarizer = summarizer or build_chat_model(
-        cfg.summarizer_model_id, cfg.summarizer_temperature, api_key
-    )
-    return model, summarizer

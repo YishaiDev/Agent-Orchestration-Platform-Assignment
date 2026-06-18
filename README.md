@@ -28,7 +28,8 @@ Goal ─▶  plan ─▶ execute ─▶ evaluate ──(structural failure: re-p
   one LLM-routed conditional edge (bounded re-plan) and a `MemorySaver` checkpointer.
 - **Inner `execute` = plain `asyncio`** — the runtime step-DAG runs with *continuous* concurrency (a
   fast step's successor starts before a slow sibling finishes), capped by a semaphore that doubles as
-  the Gemini free-tier rate limiter. A structural failure preemptively cancels in-flight steps and
+  the active provider's free-tier rate limiter. A structural failure preemptively cancels in-flight
+  steps and
   routes straight to the re-plan decider.
 
 The only LLM calls are the **planner**, the **re-plan decider**, and the **synthesizer**; step
@@ -41,7 +42,8 @@ execution is ordinary observable code. See [DECISIONS.md](DECISIONS.md) for the 
 app/
   main.py                 # entry point: starts the FastAPI server (uvicorn)
   cli.py                  # run one goal locally for debugging
-  config.yaml             # runtime parameters (models, bounds)
+  config.yaml             # runtime parameters (active provider, per-agent model tier, bounds)
+  llm_config.yml          # per-provider model ids (big/small tiers) + pricing (Groq, Gemini)
   src/
     api/                  # FastAPI app + request/response models (6 endpoints)
     engine/               # orchestration layer
@@ -72,8 +74,12 @@ Dockerfile, docker-compose.yml
 The whole platform runs as one container via Docker Compose — no local Python needed.
 
 > **API keys matter — set them in `app/.env` before running:**
-> - **`GOOGLE_API_KEY` (required)** — every LLM call (planner, the four agents, synthesizer) is
->   Gemini. Without it the server starts but any `POST /tasks` fails.
+> - **LLM provider key (required)** — the active `provider:` in `app/config.yaml` decides which key
+>   every LLM call (planner, the four agents, synthesizer) needs: `groq` (the default) uses
+>   **`GROQ_API_KEY`**, `gemini` uses **`GOOGLE_API_KEY`**. Groq is the default because its free tier
+>   is far larger than Gemini's (~14,400 req/day vs Gemini's 20/day), so multi-step runs complete
+>   without hitting a daily cap. Without the active provider's key the server starts but any
+>   `POST /tasks` fails.
 > - **`TAVILY_API_KEY` (strongly recommended)** — the Research Agent's live web search. Without it
 >   the research step has no grounded sources, so research-driven goals degrade badly. Optional only
 >   if you never run a research step.
@@ -90,7 +96,8 @@ cd Agent-Orchestration-Platform-Assignment
 # 2. create your secrets file from the template
 cp app/.env.example app/.env          # Windows: copy app\.env.example app\.env
 
-# 3. edit app/.env -> set GOOGLE_API_KEY (required); TAVILY_API_KEY (strongly recommended, research)
+# 3. edit app/.env -> set GROQ_API_KEY (default provider; or GOOGLE_API_KEY if provider: gemini);
+#    TAVILY_API_KEY (strongly recommended, research)
 
 # 4. build and run — Compose does everything: builds the image, installs deps, starts the server
 docker compose up --build             # legacy Docker: docker-compose up --build
@@ -98,8 +105,8 @@ docker compose up --build             # legacy Docker: docker-compose up --build
 
 The server is then live on `http://localhost:8000` (interactive docs at `/docs`). Compose reads
 `app/.env` and injects the keys into the container's environment; the file is never baked into the
-image (the Dockerfile copies only tracked source — `main.py`, `cli.py`, `config.yaml`, `src/`,
-`evals/` — never `.env` or the local `.venv`).
+image (the Dockerfile copies only tracked source — `main.py`, `cli.py`, `config.yaml`,
+`llm_config.yml`, `src/`, `evals/` — never `.env` or the local `.venv`).
 
 > Both `docker compose` (v2, bundled with Docker) and `docker-compose` (v1) work. Run from the repo
 > root, not from `app/`. If `app/.env` is missing, Compose stops with an error — do step 2 first.
@@ -116,7 +123,8 @@ curl http://localhost:8000/agents
 # -> [{"name":"research",...}, {"name":"analysis",...}, {"name":"code",...}, {"name":"writing",...}]
 ```
 
-Submit a real multi-step task (this **uses your GOOGLE_API_KEY**), then poll and fetch the result:
+Submit a real multi-step task (this **uses your active provider key**, `GROQ_API_KEY` by default),
+then poll and fetch the result:
 
 ```bash
 # submit -> {"task_id": "<id>", "status": "pending"}
@@ -146,13 +154,13 @@ curl -X POST http://localhost:8000/tasks \
 ```
 
 Tasks complete in a steady stream rather than instantly: concurrency is capped at `3` to respect the
-Gemini free tier's 5 requests/minute.
+active provider's free-tier rate limits (generous on Groq; tight on Gemini).
 
 ### Run locally without Docker (uv)
 
 ```bash
 cd app
-cp .env.example .env                   # Windows: copy .env.example .env   (then set GOOGLE_API_KEY)
+cp .env.example .env                   # Windows: copy .env.example .env   (then set GROQ_API_KEY)
 uv sync
 uv run python main.py                  # serves on http://localhost:8000
 ```
@@ -160,13 +168,13 @@ uv run python main.py                  # serves on http://localhost:8000
 ### Run one goal from the CLI (no server)
 
 ```bash
-cd app                                 # needs app/.env with GOOGLE_API_KEY
+cd app                                 # needs app/.env with GROQ_API_KEY (the default provider's key)
 uv run python cli.py "Compare Postgres and MySQL for analytics and write a short brief"
 ```
 
 ## Test
 
-All tests run **offline** with fake agents and fake models (no Gemini quota, no network). Each test
+All tests run **offline** with fake agents and fake models (no provider quota, no network). Each test
 file is independently runnable; `run_all_tests.py` runs the whole suite via pytest.
 
 ```powershell
@@ -260,7 +268,10 @@ curl http://localhost:8000/tasks/a1b2...
 
 ## Configuration
 
-Runtime parameters live in `app/config.yaml` (models, temperatures, and bounds: `max_replans`,
-`concurrency`, `max_steps`, `step_timeout_seconds`, `planner_max_attempts`, `context_char_budget`).
-Secrets are read from `app/.env` (never hardcoded). Concurrency defaults to `3` to stay within the
-Gemini free tier's 5 requests/minute.
+Runtime parameters live in `app/config.yaml` (the active `provider:`, per-agent model **tier**
+(`big`/`small`) + temperature, and bounds: `max_replans`, `concurrency`, `max_steps`,
+`step_timeout_seconds`, `planner_max_attempts`, `context_char_budget`). Model ids and pricing for each
+provider live in `app/llm_config.yml` — switch the whole platform between **Groq** and **Gemini** by
+changing the single `provider:` line. Secrets are read from `app/.env` (never hardcoded). Concurrency
+defaults to `3` to stay within free-tier rate limits (Groq's is generous; Gemini's allows only ~20
+requests/day).

@@ -14,7 +14,7 @@ COPY app/pyproject.toml app/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Application source (only tracked source — never .env or .venv).
-COPY app/__init__.py app/main.py app/cli.py app/config.yaml ./
+COPY app/__init__.py app/main.py app/cli.py app/config.yaml app/llm_config.yml ./
 COPY app/src ./src
 COPY app/evals ./evals
 

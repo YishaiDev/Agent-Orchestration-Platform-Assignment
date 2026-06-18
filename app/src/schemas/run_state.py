@@ -51,6 +51,8 @@ class RunState(TypedDict, total=False):
 
     ``replan_requested`` is raised by the scheduler's preemptive early-exit; ``decision`` is the
     re-plan decider's verdict (``continue`` / ``replan``) that the router branches on.
+    ``synth_failed`` is set when the synthesizer LLM call fails terminally and the engine falls back
+    to a deterministic assembly, so the judge accepts the degraded draft instead of re-judging it.
     """
 
     task_id: str
@@ -64,6 +66,7 @@ class RunState(TypedDict, total=False):
     max_resynth: int
     synth_feedback: str
     decision: str
+    synth_failed: bool
     final_output: str
     final_result: dict[str, object] | None
     error: str | None

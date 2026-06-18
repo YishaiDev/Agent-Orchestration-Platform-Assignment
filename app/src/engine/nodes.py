@@ -10,6 +10,7 @@ is testable offline with fakes.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import cast
 
@@ -22,10 +23,17 @@ from app.src.engine.planner import build_plan
 from app.src.engine.runs import RunRegistry
 from app.src.engine.scheduler import StepRunner, execute_plan
 from app.src.engine.synthesis_judge import calibrated_confidence, check_synthesis, judge_synthesis
-from app.src.engine.synthesizer import Synthesis, build_final_result, synthesize
+from app.src.engine.synthesizer import (
+    Synthesis,
+    build_final_result,
+    fallback_synthesis,
+    synthesize,
+)
 from app.src.engine.validation import PlanValidationError
 from app.src.schemas.plan import ExecutionPlan, ReplanDecision, SynthesisVerdict, TaskState
 from app.src.schemas.run_state import RunState
+
+logger = logging.getLogger("app.engine.nodes")
 
 
 @dataclass
@@ -163,13 +171,18 @@ async def synthesize_node(state: RunState, config: RunnableConfig) -> dict[str, 
     if monitor.plan is None or monitor.completed_count() == 0:
         monitor.set_draft(Synthesis(content="", confidence=0.0).model_dump())
         return {}
-    synthesis, tokens = await synthesize(
-        state["goal"],
-        monitor.plan,
-        monitor.results,
-        model=deps.synth_model,
-        feedback=state.get("synth_feedback") or None,
-    )
+    try:
+        synthesis, tokens = await synthesize(
+            state["goal"],
+            monitor.plan,
+            monitor.results,
+            model=deps.synth_model,
+            feedback=state.get("synth_feedback") or None,
+        )
+    except Exception:
+        logger.exception("synthesis call failed; falling back to deterministic assembly")
+        monitor.set_draft(fallback_synthesis(monitor.plan, monitor.results).model_dump())
+        return {"synth_failed": True}
     monitor.total_tokens += tokens
     monitor.set_draft(synthesis.model_dump())
     return {}
@@ -219,13 +232,19 @@ async def judge_node(state: RunState, config: RunnableConfig) -> dict[str, objec
     synthesis = _draft(monitor)
     if monitor.plan is None or monitor.completed_count() == 0:
         return _accept(monitor, synthesis, degraded=False)
+    if state.get("synth_failed"):
+        return _accept(monitor, synthesis, degraded=True)
     det_errors = check_synthesis(
         synthesis, monitor.plan, monitor.completed_count(), state.get("output_format") or None
     )
-    verdict, tokens = await judge_synthesis(
-        state["goal"], monitor.plan, monitor.results, synthesis, det_errors,
-        model=deps.judge_model,
-    )
+    try:
+        verdict, tokens = await judge_synthesis(
+            state["goal"], monitor.plan, monitor.results, synthesis, det_errors,
+            model=deps.judge_model,
+        )
+    except Exception:
+        logger.exception("judge call failed; accepting current draft as degraded")
+        return _accept(monitor, synthesis, degraded=True)
     monitor.total_tokens += tokens
     if verdict.verdict == "resynthesize" and state.get("resynth_rounds", 0) < state["max_resynth"]:
         return {"decision": "resynthesize", "synth_feedback": verdict.feedback,
