@@ -1,37 +1,6 @@
 # Design Decisions
 
-> **✅ Implemented** = code exists at the cited path. All four specialist agents and the full
-> orchestration layer are built, unit-tested, and eval'd. Paths are under `app/src/` unless noted.
 
-## Cross-cutting decisions
-
-**Switchable LLM provider (Groq default / Gemini).** The platform runs on either provider, selected by
-one line — `provider:` in `config.yaml`. Model ids + pricing for both live in `llm_config.yml`, keyed
-by a `big`/`small` tier; each agent role references a tier, so switching provider never touches agent
-code (`general_utils/llm.py::build_chat_model` picks the provider + key). **Driven by a real failure:**
-Gemini's free tier (~20 req/day) 429'd multi-step runs, so Groq — far larger free tier — became the
-default while Gemini stays a first-class option.
-
-**Code Agent — verification without execution (two-tier gate).** The spec's Code Agent only generates /
-explains / debugs (all text); nothing requires *running* code, and executing LLM-generated code from an
-untrusted goal would be the project's largest attack surface. So the agent has **no sandbox, no
-execution** — a bounded generate→judge→refine reflection graph producing a typed `CodeOutput`, gated per
-language (`sub_agents/code/validation.py`):
-
-- **Tier 1 — deterministic parser (ground truth):** Python via `ast.parse`; JavaScript via `tree-sitter`
-  (checks `root_node.has_error` **and** an `is_missing` walk). A parse failure feeds a bounded correction
-  loop (`max_syntax_retries`, default 4); after the budget it returns best-effort code with `parses:false`
-  rather than failing. tree-sitter is error-recovering, so it's a deliberately coarser gate than `ast` —
-  documented honestly.
-- **Tier 2 — LLM critic (fallback only):** for languages with no parser (Ruby, Go …), a cheaper,
-  independent reviewer (temp 0) returns `revise|return`, bounded by `max_review_retries`. Parser-backed
-  languages never invoke it — ground-truth-first, no added cost.
-
-The gate lands on `output["parses"]`, which the eval judge reads from the output (never recomputes, so
-the two can't drift). (✅ `sub_agents/code/validation.py`, `agent.py`; tests in `test_code_agent.py`;
-eval 5/5, including the JS Tier-1 case.)
-
----
 
 ## 1. Task Decomposition Strategy
 
@@ -233,3 +202,35 @@ not coverage. In rough priority:
 >
 > Component-level plans and the full requirements-compliance matrix are kept as internal notes outside the
 > submission tree.
+
+
+
+## Cross-cutting decisions
+
+**Switchable LLM provider (Groq default / Gemini).** The platform runs on either provider, selected by
+one line — `provider:` in `config.yaml`. Model ids + pricing for both live in `llm_config.yml`, keyed
+by a `big`/`small` tier; each agent role references a tier, so switching provider never touches agent
+code (`general_utils/llm.py::build_chat_model` picks the provider + key). **Driven by a real failure:**
+Gemini's free tier (~20 req/day) 429'd multi-step runs, so Groq — far larger free tier — became the
+default while Gemini stays a first-class option.
+
+**Code Agent — verification without execution (two-tier gate).** The spec's Code Agent only generates /
+explains / debugs (all text); nothing requires *running* code, and executing LLM-generated code from an
+untrusted goal would be the project's largest attack surface. So the agent has **no sandbox, no
+execution** — a bounded generate→judge→refine reflection graph producing a typed `CodeOutput`, gated per
+language (`sub_agents/code/validation.py`):
+
+- **Tier 1 — deterministic parser (ground truth):** Python via `ast.parse`; JavaScript via `tree-sitter`
+  (checks `root_node.has_error` **and** an `is_missing` walk). A parse failure feeds a bounded correction
+  loop (`max_syntax_retries`, default 4); after the budget it returns best-effort code with `parses:false`
+  rather than failing. tree-sitter is error-recovering, so it's a deliberately coarser gate than `ast` —
+  documented honestly.
+- **Tier 2 — LLM critic (fallback only):** for languages with no parser (Ruby, Go …), a cheaper,
+  independent reviewer (temp 0) returns `revise|return`, bounded by `max_review_retries`. Parser-backed
+  languages never invoke it — ground-truth-first, no added cost.
+
+The gate lands on `output["parses"]`, which the eval judge reads from the output (never recomputes, so
+the two can't drift). (✅ `sub_agents/code/validation.py`, `agent.py`; tests in `test_code_agent.py`;
+eval 5/5, including the JS Tier-1 case.)
+
+---
