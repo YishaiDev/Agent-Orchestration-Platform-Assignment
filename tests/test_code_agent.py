@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -292,33 +292,7 @@ def test_validate_syntax_registry() -> None:
     assert validate_syntax("not valid code at all !!", "ruby") is None
 
 
-def _main() -> None:
-    tests = [
-        test_generate_returns_code_and_content,
-        test_explain_returns_explanation,
-        test_debug_returns_revised_code,
-        test_syntax_gate_triggers_one_refine,
-        test_parser_give_up_returns_best_effort,
-        test_has_validator_normalizes_aliases,
-        test_treesitter_validates_javascript,
-        test_javascript_valid_sets_parses_true,
-        test_javascript_broken_triggers_refine,
-        test_fallback_critic_revises_then_returns,
-        test_fallback_critic_bounded_by_max_review_retries,
-        test_critic_not_used_for_parser_backed_language,
-        test_untrusted_input_is_fenced,
-        test_result_matches_spec_output_format,
-        test_actual_cost_uses_generator_then_reviewer_price,
-        test_two_code_calls_run_concurrently,
-        test_model_failure_returns_structured_failed,
-        test_off_vocabulary_action_coerces_to_generate,
-        test_validate_syntax_registry,
-    ]
-    for test in tests:
-        test()
-        print(f"PASS {test.__name__}")
-    print(f"\n{len(tests)} passed")
-
-
 if __name__ == "__main__":
-    _main()
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-v"]))

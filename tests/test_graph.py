@@ -14,7 +14,7 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -294,22 +294,7 @@ def test_judge_failure_accepts_degraded() -> None:
     assert state["final_output"] == "real synthesis"
 
 
-def _main() -> None:
-    tests = [
-        test_happy_path_completes,
-        test_structural_failure_replans_and_recovers,
-        test_bounded_replan_gives_up_to_failed,
-        test_resynthesize_loop_then_accepts,
-        test_judge_replan_loops_through_execute,
-        test_resynthesize_budget_exhausted_degrades,
-        test_synthesis_failure_falls_back_to_degraded,
-        test_judge_failure_accepts_degraded,
-    ]
-    for test in tests:
-        test()
-        print(f"PASS {test.__name__}")
-    print(f"\n{len(tests)} passed")
-
-
 if __name__ == "__main__":
-    _main()
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-v"]))

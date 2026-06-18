@@ -8,7 +8,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -124,19 +124,7 @@ def test_tokens_accumulated_across_all_nodes() -> None:
     assert final["tokens_used"] == 20
 
 
-def _main() -> None:
-    tests = [
-        test_happy_path_order_and_finalizes,
-        test_reedit_routes_back_to_edit,
-        test_reformat_routes_to_format_only,
-        test_revision_cap_forces_return,
-        test_tokens_accumulated_across_all_nodes,
-    ]
-    for test in tests:
-        test()
-        print(f"PASS {test.__name__}")
-    print(f"\n{len(tests)} passed")
-
-
 if __name__ == "__main__":
-    _main()
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-v"]))

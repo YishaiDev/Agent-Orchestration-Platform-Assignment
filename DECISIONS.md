@@ -1,403 +1,235 @@
 # Design Decisions
 
-> Status legend: **✅ Implemented** (code exists, pointed at by file) · **🟡 Designed** (decided
-> and specified, not yet coded). The platform is built component-by-component; all four specialized
-> agents **and** the orchestration layer are complete and tested offline.
-> File paths are under `app/src/` unless noted.
+> **✅ Implemented** = code exists at the cited path. All four specialist agents and the full
+> orchestration layer are built, unit-tested, and eval'd. Paths are under `app/src/` unless noted.
 
-**Build status at time of writing**
+## Cross-cutting decisions
 
-| Layer | State | Where |
-| --- | --- | --- |
-| Writing Agent (LangGraph reflection loop) | ✅ built + unit-tested + eval'd | `sub_agents/writing/` |
-| Research Agent (`create_agent` autonomous loop) | ✅ built + unit-tested + eval'd | `sub_agents/research/` |
-| Analysis Agent (autonomous `create_agent` reason/compute loop + structured summarization) | ✅ built + unit-tested + eval'd | `sub_agents/analysis/` |
-| Code Agent (two-tier gate: tree-sitter parse + LLM-critic fallback) | ✅ built + unit-tested + eval'd | `sub_agents/code/` |
-| Shared agent contract / retry / token + cost capture | ✅ built | `general_utils/agent_base.py`, `general_utils/` |
-| Planner + DAG validation | ✅ built + unit-tested | `engine/planner.py`, `engine/validation.py` |
-| Scheduler (continuous-concurrency inner executor) + dispatch | ✅ built + unit-tested | `engine/scheduler.py`, `engine/dispatch.py` |
-| Monitor (trace, status, totals, failure classification) | ✅ built + unit-tested | `engine/monitor.py` |
-| Re-plan decider + bounded merge | ✅ built + unit-tested | `engine/evaluation.py` |
-| Synthesizer (provenance) | ✅ built + unit-tested | `engine/synthesizer.py` |
-| Synthesis quality judge (deterministic checks + LLM judge, 3 actions) | ✅ built + unit-tested + eval'd | `engine/synthesis_judge.py` |
-| LangGraph outer loop (plan→execute→evaluate→synthesize→judge) | ✅ built + unit-tested | `engine/graph.py`, `engine/nodes.py` |
-| API (6 endpoints) + entry points | ✅ built + unit-tested | `api/`, `main.py`, `cli.py` |
+**Switchable LLM provider (Groq default / Gemini).** The platform runs on either provider, selected by
+one line — `provider:` in `config.yaml`. Model ids + pricing for both live in `llm_config.yml`, keyed
+by a `big`/`small` tier; each agent role references a tier, so switching provider never touches agent
+code (`general_utils/llm.py::build_chat_model` picks the provider + key). **Driven by a real failure:**
+Gemini's free tier (~20 req/day) 429'd multi-step runs, so Groq — far larger free tier — became the
+default while Gemini stays a first-class option.
 
-**Switchable LLM provider (Groq / Gemini), tier-based config.** ✅ The platform runs on either
-**Groq** (default) or **Google Gemini**, selected by one line — `provider:` in `config.yaml`.
-Model ids and pricing for both providers live in `llm_config.yml`, keyed by a `big`/`small` tier;
-each agent role references a tier, so switching provider is a single edit that never touches agent
-code. `general_utils/llm.py::build_chat_model` selects the provider and API key from the active
-`provider:` in config (`groq` → `groq` / `GROQ_API_KEY`, `gemini` → `google_genai` /
-`GOOGLE_API_KEY`). **Driven by a real failure:** Gemini's free tier rate-limited (429) multi-step
-runs (see the retry note below) — its ~20-requests/day cap dies on a single multi-step task — so
-Groq, whose free tier is far larger, became the default while Gemini stays a first-class option.
+**Code Agent — verification without execution (two-tier gate).** The spec's Code Agent only generates /
+explains / debugs (all text); nothing requires *running* code, and executing LLM-generated code from an
+untrusted goal would be the project's largest attack surface. So the agent has **no sandbox, no
+execution** — a bounded generate→judge→refine reflection graph producing a typed `CodeOutput`, gated per
+language (`sub_agents/code/validation.py`):
 
-**Code Agent — verification without execution (two-tier gate).** The spec's Code Agent does
-generate / explain / debug, all text-producing tasks; **nothing in the spec requires running code**,
-and executing LLM-generated code from an untrusted goal string would be the single largest attack
-surface in the project. So the agent ships with **no sandbox, no tool loop, no execution** — it
-mirrors the Writing agent shape: a bounded **generate → judge → (refine) reflection graph**
-(`StateGraph`, no tools) producing a typed `CodeOutput`. Correctness is gated by
-a **two-tier quality gate** (`sub_agents/code/validation.py`, `agent.py`), the tier chosen per
-language by `has_validator(language)`:
+- **Tier 1 — deterministic parser (ground truth):** Python via `ast.parse`; JavaScript via `tree-sitter`
+  (checks `root_node.has_error` **and** an `is_missing` walk). A parse failure feeds a bounded correction
+  loop (`max_syntax_retries`, default 4); after the budget it returns best-effort code with `parses:false`
+  rather than failing. tree-sitter is error-recovering, so it's a deliberately coarser gate than `ast` —
+  documented honestly.
+- **Tier 2 — LLM critic (fallback only):** for languages with no parser (Ruby, Go …), a cheaper,
+  independent reviewer (temp 0) returns `revise|return`, bounded by `max_review_retries`. Parser-backed
+  languages never invoke it — ground-truth-first, no added cost.
 
-- **Tier 1 — deterministic parser (ground truth).** Python via stdlib `ast.parse` (exact);
-  JavaScript via `tree-sitter` + `tree-sitter-javascript` (a parse fails on `root_node.has_error`
-  **or any `is_missing` node** — the missing-node walk catches inserted MISSING nodes `has_error`
-  alone skips). A real parse error is unambiguous and feeds a bounded correction loop (one refine
-  call per failure, capped by `max_syntax_retries`, default 4). tree-sitter is error-recovering, so
-  it is a **deliberately coarser gate** than `ast` (catches gross breakage, not every subtle error)
-  — documented honestly. **Graceful give-up:** after the retry budget the agent returns the
-  best-effort code, **not** a failure — status stays `completed` and the output records the
-  unverified state (`parses: false` + `validation_error`).
-- **Tier 2 — LLM critic, fallback only.** For languages with **no** registered parser (Ruby, Go,
-  …) — the only signal where a parser can't reach. A **cheaper, independent** reviewer
-  (`review_model_id`, default `gemini-2.5-flash`, temp 0) returns
-  `CodeVerdict{verdict: revise|return, issues}`; `revise` recalls the generator with concrete
-  issues, bounded by `max_review_retries`. Independence (different model, temp 0) avoids the
-  self-approval bias of a model grading its own output, at a fraction of the generator's cost.
-  Parser-backed languages **never** invoke the critic — ground-truth-first, no added cost.
-
-The gate result lands on a single key, `output["parses"]` (`true`/`false`/`null` when no parser),
-which the eval judge reads **from the agent output** rather than recomputing, so the two never
-drift. **(✅ built + unit-tested, `tests/sub_agents/test_code_agent.py` — 19 cases covering both
-tiers, alias normalization, graceful give-up, parser-vs-critic routing, fencing, and
-generator-vs-reviewer cost accounting; eval'd via `evals/judges/code_judge.py` +
-`evals/datasets/code_agent.yaml` — generate Python/JavaScript, explain, debug, and an
-injection-safety probe, judged against the deterministic parse signal. The latest live run scored
-**5/5 PASS** — including the JavaScript case, where `parses=yes` confirms the Tier-1 tree-sitter gate
-now actually fires on JS (a prior run showed `n/a` before the grammar was wired in).)**
+The gate lands on `output["parses"]`, which the eval judge reads from the output (never recomputes, so
+the two can't drift). (✅ `sub_agents/code/validation.py`, `agent.py`; tests in `test_code_agent.py`;
+eval 5/5, including the JS Tier-1 case.)
 
 ---
 
 ## 1. Task Decomposition Strategy
 
-**Approach chosen:** A dedicated **Gemini planner** emits a strict-JSON `ExecutionPlan` (the spec's
-plan shape: `steps[]` with `id/agent/action/input/dependencies`, plus `parallel_groups`). It is
-**validated as a DAG before any execution** — never executed raw. A single planning LLM call over a
-custom scheduler is preferred to one monolithic autonomous agent because the plan is then an
-*inspectable, testable artifact* (satisfies the spec's "View execution trace" / "plan generation"
-test) rather than hidden chain-of-thought. **(✅ built — `engine/planner.py` emits a reasoning-first
-`PlannerDraft`; `engine/validation.py` finalizes it into an `ExecutionPlan` with derived
-`parallel_groups`.)**
+**Approach chosen:** A dedicated planner emits a strict-JSON `ExecutionPlan` (the spec's shape: `steps[]`
+with `id/agent/action/input/dependencies` + `parallel_groups`), **validated as a DAG before any
+execution** — never run raw. One structured planning call + deterministic validation beats a monolithic
+autonomous agent because the plan becomes an *inspectable, testable artifact*, not hidden
+chain-of-thought. The planner is pinned on three axes: *when* — **static** (full plan upfront), not
+per-step dynamic; *what* — a **dependency DAG**, not a flat list; *how* — **one structured call +
+validation**, not a `create_agent` loop mutating the plan live. An autonomous orchestrator was rejected
+on the rubric: inherently sequential (no continuous concurrency), non-deterministic (hurts Tests), opaque
+(hurts Observability), and a single point of failure. The project keeps **autonomy at the leaves**
+(Research *is* a `create_agent` loop) and **determinism at the backbone** (planner → scheduler →
+synthesizer). (✅ `engine/planner.py` emits a reasoning-first `PlannerDraft`; `engine/validation.py`
+finalizes it with derived `parallel_groups`.)
 
-**Planner pinned on three design axes.** Researching how to define a planner surfaced three
-independent choices, and this project pins each: *when* it plans — **static** (a full plan upfront),
-not dynamic per-step; *what* it emits — a **dependency DAG**, not a flat ordered list; *how* it is
-controlled — **one structured call + deterministic validation**, not a `create_agent` reasoning loop
-that holds and mutates the plan live. An autonomous LLM orchestrator was considered and rejected on
-the rubric: it is *inherently sequential* (a ReAct loop cannot deliver the continuous concurrency
-the Performance dimension grades), non-deterministic (hurts Tests), opaque (hurts Observability),
-and a single point of failure — if that one orchestrator LLM rate-limits mid-run the whole task
-dies. The project instead keeps **autonomy at the leaves** (the Research agent *is* a `create_agent`
-loop, where the next move is genuinely unknowable upfront) and **determinism at the backbone**
-(planner → scheduler → synthesizer), injecting LLM judgment only at one bounded decision point
-(re-plan, §4). The result is live-validated, monitored, updatable execution that still keeps
-concurrency, observability, and testability. **(✅ built — the LangGraph outer loop in
-`engine/graph.py` wraps the plain-async inner executor in `engine/scheduler.py`.)**
+**Planner prompt:** the embedded output JSON schema; a few-shot goal→plan example; the **agent registry**
+(each agent's name + allowed actions + capabilities) so only routable steps can be emitted; and
+pass-through of `constraints`/`output_format` into step inputs. The untrusted `goal` is **fenced as data**
+(`sub_agents/_prompt_utils.py::fence`, applied in `engine/prompts.py`).
 
-**Planner prompt — key elements:** the embedded output JSON schema; a few-shot example mapping a
-goal → `steps`/`dependencies`/`parallel_groups`; the **agent registry** (each agent's name +
-allowed `action`s + capabilities) so the planner can only emit routable steps; and pass-through of
-the task `constraints`/`output_format` into the relevant step inputs. The untrusted `goal` is
-**fenced as data**, reusing the same defense already applied in the Writing/Research prompts
-(`sub_agents/_prompt_utils.py::fence`, applied in `engine/prompts.py`). **(✅ built.)**
-
-**Validation:** Pydantic parse of the model output → topological **cycle check (Kahn)** →
-referential checks (every `step.agent` exists in the registry; every `action` is valid for that
-agent; every dependency id exists). An invalid plan triggers **one bounded re-ask**, then fails
-cleanly. This mirrors the principle already implemented in the agents: **LLM output is parsed into
-a typed schema before it is trusted** (`general_utils/agent_base.py::invoke_structured` uses
-`with_structured_output(..., include_raw=True)` so every node returns a validated Pydantic object,
-✅). **(Plan-level validator: ✅ built — `engine/validation.py::validate_and_finalize`; one bounded
-re-ask in `engine/planner.py` feeds the validation errors back to the model.)**
+**Validation:** Pydantic parse → topological **cycle check (Kahn)** → referential checks (agent exists,
+action valid for that agent, every dependency id exists). An invalid plan triggers **one bounded re-ask**,
+then fails cleanly — the same principle as the agents: LLM output is parsed into a typed schema before it
+is trusted (`agent_base.py::invoke_structured`). (✅ `engine/validation.py::validate_and_finalize`.)
 
 ---
 
 ## 2. Dependency Management
 
-**Approach chosen:** The **dependency edges are the source of truth**; the LLM's `parallel_groups`
-is treated as a *hint / cross-check*, not as the executor's authority. Execution order is derived
-from **in-degree readiness** computed from `dependencies`, so the system is correct even if the
-planner's `parallel_groups` are wrong. **(✅ built — `engine/scheduler.py` launches steps off live
-dependency readiness, not `parallel_groups`.)**
+**Approach chosen:** The **dependency edges are the source of truth**; the LLM's `parallel_groups` is a
+hint/cross-check, not the executor's authority. Execution order derives from **in-degree readiness**
+computed from `dependencies`, so the system is correct even if `parallel_groups` is wrong.
+(✅ `engine/scheduler.py`.)
 
-**Data passing:** Each finished step's `AgentResult.output` is injected into its dependents' input.
-The agent output contract is **already implemented and uniform** across agents
-(`general_utils/agent_base.py::AgentResult`: `step_id, agent, status, output, tokens_used, execution_time_ms`, plus
-additive `est_cost_usd`/`actual_cost_usd`), so the orchestrator can consume any agent's result
-unchanged (✅ contract). To protect the token budget, upstream outputs are **summarized/trimmed
-before injection** rather than raw-concatenated, trimmed to `context_char_budget`
-(`engine/dispatch.py` builds each dependent's upstream context). **(Wiring into the
-scheduler: ✅ built.)**
+**Data passing:** Each finished step's `AgentResult.output` is injected into its dependents' input. The
+output contract is uniform across agents (`agent_base.py::AgentResult`: `step_id, agent, status, output,
+tokens_used, execution_time_ms` + additive `est_cost_usd`/`actual_cost_usd`), so the orchestrator consumes
+any agent's result unchanged. Upstream outputs are **summarized/trimmed** to `context_char_budget` before
+injection (not raw-concatenated) to protect the token budget (`engine/dispatch.py`).
 
-**Cycle detection:** Kahn's algorithm at plan-validation time; a plan whose steps cannot be fully
-topologically ordered is rejected **before** execution (no partial run on a cyclic plan).
-**(✅ built — `engine/validation.py::derive_parallel_groups` raises on any cycle.)**
+**Cycle detection:** Kahn's algorithm at validation time; a plan that can't be fully topologically ordered
+is rejected **before** execution — no partial run on a cyclic plan
+(`engine/validation.py::derive_parallel_groups`).
 
-**Pre-execution cost estimate — measured prompt, not a flat constant.** The additive `est_cost_usd`
-is a *pre-run* forecast (distinct from `actual_cost_usd`, which the token-cost middleware measures
-from `usage_metadata` after the fact). It was first computed from a hardcoded per-agent
-`_AVG_INPUT_TOKENS` constant × expected calls, so two requests whose prompts differed 10× in size
-got an identical estimate. It now counts the **real assembled prompt** via
-`general_utils/tokens.py::count_prompt_tokens` (a character-ratio heuristic, `chars_per_token` in
-`app/config.yaml`), so the estimate scales with instruction + upstream context + data-preview size;
-only the genuinely-unknowable parts (output length, loop-turn count) stay as config knobs
-(`avg_output_tokens` per agent). **(✅ built — `general_utils/tokens.py`, wired into
-`sub_agents/{analysis,research,code}/agent.py`; unit-tested `tests/general_utils/test_tokens.py` —
-**5/5 PASS** covering empty prompts, real-length counting, monotonic growth with size, and
-`chars_per_token` sensitivity.)**
-
-**Design journey (how we got here):** flat per-agent constant → questioned directly (*"is there a
-better way to estimate the cost?"*); a web sweep **and** the `agent-building` cost-optimization
-reference both said the same thing — *count the real tokens, don't assume averages*. **Option A —
-call the provider tokenizer** (`get_num_tokens_from_messages`) for an exact count: rejected on
-Performance + Tests — Gemini's counter is a **synchronous network call**, and the agents are
-`async`, so invoking it on the hot path would block the event loop (killing the continuous
-concurrency §3 grades) and would fail on the injected offline test doubles, adding a network failure
-mode to what is only an estimate. **Option B — deterministic character-ratio over the real prompt**
-(chosen): captures the actual win (the estimate now tracks prompt size) with no blocking call, no new
-failure mode, and full determinism. The `agent-building` reference's own stance sealed it —
-*pre-execution estimates are inherently rough; the precise signal is the measured `actual_cost`* — so
-paying a per-run network round-trip for exactness on the *estimate* is the wrong trade.
+*Design journey — cost estimate became a measured prompt, not a flat constant.* The pre-run `est_cost_usd`
+(distinct from the measured post-run `actual_cost_usd`) first multiplied a hardcoded per-agent
+`_AVG_INPUT_TOKENS` by call count, so two prompts differing 10× in size got the same estimate. Asked *"is
+there a better way?"*, a web sweep and the `agent-building` cost reference both said: count the real
+tokens. **Option A — call the provider tokenizer** for an exact count: rejected — it's a *synchronous
+network call*, and the agents are async, so it would block the event loop (killing §3 concurrency) and
+crash the offline test doubles, adding a network failure mode to a mere estimate. **Option B —
+deterministic character-ratio over the real assembled prompt** (chosen): the estimate now tracks
+instruction + context + data size, with no blocking call and full determinism; exact accounting stays the
+measured `actual_cost`. (✅ `general_utils/tokens.py::count_prompt_tokens`; tests in `test_tokens.py`.)
 
 ---
 
 ## 3. Parallel Execution
 
-**Approach chosen:** A **continuous ready-set scheduler** on `asyncio`
-(`engine/scheduler.py::execute_plan`): all currently-ready steps are launched as tasks, the driver
-awaits `asyncio.wait(..., FIRST_COMPLETED)`, and **the instant any step finishes** its newly-ready
-successors are launched — *without* waiting for its siblings. This is **genuinely concurrent and
-non-wave** (the spec calls out "not sequential async"): a fast step's successor starts before a slow
-sibling finishes, which a wave-synchronous `gather`/super-step model would block. It is real overlap
-because the agents are async at the call boundary — Research is `async def run_research_agent(...)`
-and awaits real I/O (Tavily + Gemini), so the waits overlap rather than serialize (✅ agent is async).
-**(Scheduler: ✅ built + unit-tested, `tests/engine/test_scheduler.py`.)**
+**Approach chosen:** A **continuous ready-set scheduler** on `asyncio` (`scheduler.py::execute_plan`): all
+ready steps launch as tasks, the driver awaits `asyncio.wait(FIRST_COMPLETED)`, and **the instant any step
+finishes** its newly-ready successors launch — without waiting for siblings. This is genuinely concurrent
+and non-wave (the spec's "not sequential async"): a fast step's successor starts before a slow sibling
+finishes, which a `gather`/super-step model would block. Real overlap because agents are async at the call
+boundary (Research awaits Tavily + LLM I/O). (✅ tests in `test_scheduler.py`.)
 
-**Concurrency limit:** an `asyncio.Semaphore` sized from `orchestrator.concurrency` in
-`app/config.yaml` (default 3) caps simultaneous LLM/search calls — this doubles as the **rate-limit
-throttle** the Gemini free tier forces (the live eval in `evals/` had to drop to one worker; see
-Failure Recovery). **(✅ built.)**
+**Concurrency limit:** an `asyncio.Semaphore` sized from `orchestrator.concurrency` (default 3) caps
+simultaneous LLM/search calls — doubling as the active provider's free-tier rate-limit throttle.
 
-**Error handling (parallel step fails):** per-step policy (section 4). A failed step marks its
-transitive *dependents* `skipped` but **independent branches keep running** — no task-wide abort. This
-is safe because **agents never raise**: every agent catches all exceptions and returns a
-`status="failed"` `AgentResult` with an `error` field (✅), so the scheduler always gets a result
-object to route on, never an exception mid-flight. The one exception that *does* propagate by design
-is `asyncio.CancelledError` (a `BaseException`, not caught by the agents' `except Exception`), so a
-preemptively cancelled step dies immediately and is recorded `cancelled`. **(✅ built — failure
-classification in `engine/monitor.py`, cancellation in `engine/scheduler.py`.)**
+**Error handling:** per-step policy (§4). A failed step marks its transitive *dependents* `skipped` but
+**independent branches keep running** — no task-wide abort. Safe because **agents never raise**: each
+catches all exceptions and returns a `status="failed"` `AgentResult`, so the scheduler always gets a
+result to route on. The one exception that propagates by design is `asyncio.CancelledError` (not caught by
+`except Exception`), so a cancelled step dies immediately and is recorded `cancelled`.
+(✅ classification in `engine/monitor.py`.)
 
 ---
 
 ## 4. Failure Recovery
 
-**Approach chosen — a five-rung escalation ladder, cheapest first:** (1) **retry** the step
-(transient errors — bounded backoff, already at the agent layer); (2) **skip + continue** (a failed
-step marks only its dependents `skipped`; independent branches survive); (3) **partial result** (a
-non-critical branch is lost — the synthesizer reports the omission honestly); (4) **partial or failed
-task** (a *load-bearing* step fails — it is itself non-`optional`, or its skip-cascade strips a
-non-`optional` dependent — so *crucial* work is lost and the failure is classified `structural`;
-criticality is read from a per-step `optional` flag plus the dependency graph, not an undefined
-"sink"); (5) **bounded re-plan** (the failure is `structural` and re-planning
-is still allowed; the merge protocol freezes completed steps, namespaces new ids under an `r{n}_`
-prefix, and re-validates the merged DAG). Rungs 1–4 keep the planner static and the engine
-deterministic; only rung 5 re-invokes the LLM, and it is capped by `max_replans` (default 1). Final
-**task status follows the spec set**: a run keeps `status="completed"` with a partial result + the
-failed/skipped lists whenever *any* step completed, and only reports `failed` when nothing completed
-at all — there is no non-spec "partial" status (`engine/nodes.py::_final_status`). **(✅ built +
-unit-tested across `tests/engine/test_scheduler.py`, `test_monitor.py`, `test_evaluation.py`,
-`test_graph.py`.)**
+**Approach chosen:** a five-rung escalation ladder, cheapest first — (1) **retry** the step (transient
+errors, bounded backoff, at the agent layer); (2) **skip + continue** (a failed step marks only its
+dependents `skipped`; independent branches survive); (3) **partial result** (a non-critical branch is lost
+— the synthesizer reports the omission); (4) **partial/failed task** (a *load-bearing* step fails —
+classified `structural`); (5) **bounded re-plan** (`structural` + re-planning still allowed; the merge
+freezes completed steps, namespaces new ids under `r{n}_`, re-validates the DAG). Rungs 1–4 keep the engine
+deterministic; only rung 5 re-invokes the LLM, capped by `max_replans` (default 1). Final status follows
+the spec set: `completed` (with partial result + failed/skipped lists) whenever *any* step completed,
+`failed` only when nothing did — no non-spec "partial" status (`engine/nodes.py::_final_status`).
 
-**Deterministic classification decides *whether* to consult the LLM; the LLM decides *whether to
-re-plan*.** The same cost-aware principle as the agents — a free deterministic check first, an LLM
-call only where it changes a decision — but at the orchestrator the deterministic pre-filter is a
-**structural classification, not a confidence threshold**. When a step fails, the Monitor classifies
-it (`engine/monitor.py::classify_failure`): it is **structural** when the failure loses *crucial*
-work — the failed step is itself non-`optional`, or its skip-cascade strips a non-`optional`
-dependent — and **skippable** only when the loss is confined to `optional` steps (mark the branch
-skipped, let healthy branches keep running, no LLM call). Only a `structural`
-failure consults the LLM **re-plan decider** (`engine/evaluation.py::decide_replan`), one bounded call
-given **the whole current plan, which steps finished and their outputs, and the failed step + its
-error**, that returns `continue` (the goal is still reachable from what completed) or `replan` (revised
-steps for the unfinished part). This keeps the planner static and the hot path deterministic, calls the
-LLM at exactly one bounded decision point, and never exhausts the Gemini free tier (5 rpm / 20-per-day)
-the way a judge-after-every-step would. Offline LLM-as-judge stays in `evals/` for regression, separate
-from this online control path. **(✅ built + unit-tested, `tests/engine/test_monitor.py`,
-`test_evaluation.py`.)**
+**Retry logic:** **exponential backoff with jitter** at the model-call boundary, bounded attempts —
+`@retry(stop=stop_after_attempt(6), wait=wait_exponential_jitter(initial=4, max=70))` in
+`agent_base.py::invoke_structured`, plus provider-level `max_retries=6`. **Driven by a real failure:** the
+live eval hit Gemini `429 RESOURCE_EXHAUSTED` (free tier = 5 req/min **and** 20/day per model); the backoff
++ a single-worker eval + a `--model` quota-fallback override are the direct response.
 
-**Design journey (criticality, driven by a live failure).** The classifier originally returned
-`skippable` whenever *any* non-`optional` step survived the cascade. A live robustness run exposed the
-flaw: a research step the planner had made load-bearing failed, its cascade skipped 4 of the remaining
-5 steps, but one independent branch survived — so the binary "any survivor?" test said `skippable` and
-**suppressed the re-plan**, returning a thin 1-of-6-step partial. **Option A — a numeric
-loss-threshold** (escalate to `structural` when the cascade removes ≥ X% of remaining non-`optional`
-steps): rejected as semantically blind — an arbitrary `0.5` knob treats every step as equal weight and
-cannot tell "lost 1 crucial step of 6" from "lost 1 optional step of 2". **Option B — per-step
-criticality** (chosen): a failure is `structural` when it loses crucial work — the failed step is
-non-`optional`, or its cascade strips a non-`optional` dependent. No magic number, and it reuses the
-`optional` flag the schema **already** carries (no new planner field to mis-tag); the heuristic only
-decides *whether to consult* the decider, which still makes the final continue-vs-replan call.
-**(✅ built — `engine/monitor.py::classify_failure`; unit-tested `tests/engine/test_monitor.py` —
-required-failure-with-surviving-branch → `structural`, optional-failure-losing-a-crucial-dependent →
-`structural`, optional-only loss → `skippable`.)**
+**Partial results:** `AgentResult.status` already encodes degraded completion — the Writing Agent returns
+`completed_degraded` with `unresolved_issues` at its reflection cap. The synthesizer composes from whatever
+succeeded, **tags provenance** (which agent produced what, with confidence + sources), lists skipped/failed
+steps, and is prompted to **reconcile conflicts** (prefer higher confidence / more sources, note the
+disagreement) rather than concatenate. (✅ `engine/synthesizer.py`, tests in `test_synthesizer.py`.)
 
-**Synthesis never crashes the run — a deterministic fallback under the LLM judge.** Both LLM calls in
-the synthesize→judge tail can fail terminally (a malformed structured-output call rejected `400
-tool_use_failed`, a daily-quota `429`, a network drop), and before this fix such a raw failure
-propagated out of the node and **crashed the whole run, discarding every completed step**. The outer
-loop now extends the agents' "never raise" guarantee to itself: `synthesize_node` wraps the call and,
-on any exception, assembles a **deterministic best-effort answer** from the completed step outputs
-(`engine/synthesizer.py::fallback_synthesis` — leads with the Writing agent's already-coherent prose
-when present, appends every completed code block verbatim, else stitches the rendered outputs) and
-flags `synth_failed`; `judge_node` then short-circuits to `accept` as `completed_degraded` (and its own
-call is guarded the same way). Confidence is held low and calibrated down, so a fallback never claims
-full confidence. The model swap was considered and rejected as *the* fix: routing synthesis to the
-function-calling-reliable `tools` tier only **lowers the probability** of one failure mode and can't
-cover `429`/quota/network, and that tier's 8K-TPM free window is too small for synthesis (the heaviest
-call); the fallback covers the whole failure class for zero tokens, with the model choice left as an
-independent dial. **(✅ built — `engine/synthesizer.py::fallback_synthesis`,
-`engine/nodes.py::{synthesize_node,judge_node}`; unit-tested `tests/engine/test_graph.py` —
-synthesis-call failure → `completed_degraded` with non-empty content incl. code, judge-call failure →
-accepts the draft degraded; both with no exception. Confirmed live: a run that hit `tool_use_failed`
-at synthesis returned a degraded answer instead of crashing.)**
+The remaining mechanisms all follow one principle — **a free deterministic check decides whether to spend
+an LLM call; the LLM makes only the judgment a parser can't:**
 
-**Research re-asks a malformed tool call instead of failing the step.** The provider intermittently
-rejects a tool call with `400 tool_use_failed` — Llama emits its own `<function=…>{json}` dialect, and
-even the `tools`-tier GPT-OSS occasionally **leaks a harmony channel token into the tool name**
-(`web_search<|channel|>commentary`). It is sampling-dependent, so the model-call backoff (§ retry
-logic) can't help — a `400` is not transient. The Research agent now wraps just the agent loop in a
-**bounded re-ask** (`sub_agents/research/agent.py::_invoke_with_tool_retry`): on a `tool_use_failed`
-it rebuilds the model with a **bumped temperature** and a fresh context and retries
-(`tool_retry_attempts`/`tool_retry_temp_bump` in `config.yaml`). The perturbation is the point —
-research runs at temperature 0, so a plain retry would re-sample the identical bad call; nudging
-temperature lets a well-formed call emerge. After the budget the broad `except` still degrades to a
-clean `failed` `AgentResult` (never a crash), and a research-step failure is now recoverable by the
-criticality re-plan above. **(✅ built — `sub_agents/research/agent.py`; unit-tested
-`tests/sub_agents/test_research_agent.py` — fail-once → recovers, always-fail → bounded `failed`.)**
+- **Criticality classification → re-plan decider.** When a step fails, the Monitor classifies it
+  (`monitor.py::classify_failure`): **structural** if it loses *crucial* work (the failed step is
+  non-`optional`, or its skip-cascade strips a non-`optional` dependent), else **skippable** (loss confined
+  to `optional` steps — no LLM call). Only `structural` consults the LLM **re-plan decider**
+  (`evaluation.py::decide_replan`), one bounded call given the whole plan + completed outputs + the failed
+  step, returning `continue` or `replan`. *Design journey:* the classifier first said `skippable` whenever
+  *any* non-`optional` step survived — a live run where a load-bearing research failure gutted 5 of 6 steps
+  but one branch survived wrongly suppressed re-plan. **Option A — a numeric loss-threshold (≥X% removed):**
+  rejected as semantically blind (treats every step as equal weight). **Option B — per-step criticality**
+  (chosen): no magic number, and it reuses the `optional` flag the schema already carries. (✅ tests in
+  `test_monitor.py`, `test_evaluation.py`.)
+- **Synthesis never crashes the run.** Both LLM calls in the synthesize→judge tail can fail terminally
+  (`400 tool_use_failed`, `429`, network); previously such a failure crashed the run and discarded every
+  completed step. `synthesize_node` now extends the agents' "never raise" guarantee: on any exception it
+  assembles a **deterministic best-effort answer** from completed outputs (`synthesizer.py::fallback_synthesis`
+  — Writing prose first, then every code block verbatim) flagged `synth_failed`; `judge_node` short-circuits
+  to `accept` as `completed_degraded`, guarded the same way. A model swap was rejected as *the* fix: routing
+  synthesis to the tool-reliable tier only lowers one failure mode's probability and can't cover
+  429/quota/network; the fallback covers the whole class for zero tokens, with model choice left as an
+  independent dial. (✅ tests in `test_graph.py`; confirmed live.)
+- **Research re-asks a malformed tool call.** The provider intermittently rejects a tool call `400
+  tool_use_failed` (Llama emits its own `<function=…>` dialect; GPT-OSS leaks a harmony channel token into
+  the tool name). It's sampling-dependent, so backoff can't help (a 400 isn't transient). The agent wraps
+  just the loop in a **bounded re-ask** with a **bumped temperature** and fresh context
+  (`research/agent.py::_invoke_with_tool_retry`) — the perturbation is the point (research runs at temp 0,
+  so a plain retry re-samples the identical bad call). After the budget it degrades to a clean `failed`
+  result. (✅ tests in `test_research_agent.py`.)
+- **Synthesis quality judge — the last unguarded stage gets the same two-tier gate.** Synthesis was the
+  only outer-loop stage shipping unchecked LLM output. The fix mirrors the planner: free deterministic
+  checks first (`synthesis_judge.py::check_synthesis` — empty content, `output_format` non-compliance,
+  attribution to non-existent step ids), one structured LLM judge second, as **two flat graph nodes**
+  (`synthesize`→`judge`) with corrective loops as edges. The judge returns **3 actions**: `accept`,
+  `resynthesize` (cheap retry over the same outputs, bounded by `max_resynth`=2), or `replan` (the outputs
+  lack the info; reuses the shared `max_replans` budget). Reported confidence is **calibrated** down to the
+  completion ratio at accept time. On budget exhaustion it takes `accept` as `completed_degraded` rather
+  than looping. *Design journey (5 forks):* (1) I caught the gap with one question — *"where is synthesis's
+  validation layer, and should it retrigger the graph?"*; (2) deterministic-only rejected — a parser can't
+  catch a *fabricated* statistic, so the judge is mandatory (checks stay as a free first tier); (3) reusing
+  the `evaluate` node rejected — it's purpose-built for step-failure classification and moving it would
+  un-guard execution → a separate judge; (4) 4 actions → 3 (`rerun` folded into `replan` — a degenerate
+  replan); (5) nested subgraph rejected for flat nodes — `replan` must reach the sibling `execute` node, and
+  an in-node loop hides from the trace + checkpointer. (✅ `engine/synthesis_judge.py`, `nodes.py`; tests in
+  `test_synthesis_judge.py` + `test_graph.py`; eval 5/5.)
 
-**Monitoring (Observability dimension).** The Monitor is the platform's context bus and the spec's
-required monitoring surface: a per-step **execution trace** (agent, action, in/out, status,
-duration, tokens, timestamps), live **task status + progress** (`completed/total`, current step),
-**agent outputs**, and **token usage**. Trace appends and counter bumps are synchronous store
-mutations (safe under single-threaded asyncio — no lock needed). It is the single source feeding the
-API status/result/trace endpoints and the structural classification above; it lives **off** the
-checkpointed LangGraph state (in `engine/runs.py::RunRegistry`, keyed by `task_id`) so the API can
-read live status while the graph is still running, and so the checkpointed state stays small and
-msgpack-serializable. **(✅ built — `engine/monitor.py`, `engine/runs.py`.)**
+**Monitoring (Observability).** The Monitor is the platform's context bus and required monitoring surface:
+per-step **execution trace** (agent, action, in/out, status, duration, tokens, timestamps), live **status +
+progress**, **agent outputs**, **token usage**. It lives **off** the checkpointed LangGraph state
+(`engine/runs.py::RunRegistry`, keyed by `task_id`) so the API can read live status mid-run and the
+checkpointed state stays small + msgpack-serializable. Trace appends are synchronous store mutations (safe
+under single-threaded asyncio). (✅ `engine/monitor.py`, `runs.py`.)
 
-**Retry logic:** **exponential backoff with jitter** at the model-call boundary, bounded attempts.
-Implemented in `general_utils/agent_base.py::invoke_structured` via
-`@retry(stop=stop_after_attempt(6), wait=wait_exponential_jitter(initial=4, max=70), reraise=True)`,
-plus provider-level `max_retries=6` in `general_utils/llm.py::build_chat_model` (✅). This was
-**driven by a real failure**: the live eval hit Gemini `429 RESOURCE_EXHAUSTED` (free tier =
-5 req/min **and** 20 req/day per model); the backoff/jitter and a single-worker eval are the direct
-response (the eval also gained a `--model` override to fall back to a model with separate quota).
-The Research eval (`evals/judges/research_judge.py` + `evals/datasets/research_agent.yaml`, 5 LLM-judged
-examples spanning factual lookup, comparison, recent-developments, how-to, and an **unanswerable /
-anti-hallucination** probe) ran end-to-end and scored **4/5 PASS**; the lone failure was the daily-quota
-casualty above (the agent returned a clean `status="failed"` `AgentResult`, never crashed the batch),
-not a grounding regression — directly exercising this section's "agents never raise" guarantee.
-
-**Partial results:** the spec's `AgentResult.status` already encodes degraded completion. The
-Writing Agent returns **`completed_degraded`** with `unresolved_issues` when it hits the reflection
-cap with open judge issues (`sub_agents/writing/agent.py::assemble_result`, ✅). The synthesizer
-composes from whatever succeeded, **tags provenance per the spec** (which agent produced
-what, with per-step confidence and sources), and lists skipped/failed steps; final task status
-reflects partial vs. full completion. The synthesizer prompt is also told to **reconcile conflicts**
-(prefer higher `confidence` / more sources and note the disagreement) rather than concatenate.
-**(Synthesizer: ✅ built — `engine/synthesizer.py`, unit-tested `tests/engine/test_synthesizer.py`.)**
-
-**Synthesis quality judge — the last unguarded stage gets the same two-tier gate as planning.**
-Synthesis was the only outer-loop stage whose output reaches the user with no quality gate: one LLM
-call, and whatever parsed became the `FinalResult`. The fix mirrors the planner's discipline — **free
-deterministic checks first, one structured LLM judge second** — modelled as **two thin graph nodes**
-(`synthesize` → `judge`) with the corrective loops as graph edges, so the loop is traced,
-checkpointed, and unit-testable rather than hidden in an in-node `for`-loop. The judge returns one of
-**three actions**: `accept` (ship), `resynthesize` (cheap retry with scoped feedback over the *same*
-outputs — for an unsupported claim, incoherence, or a format violation), or `replan` (the outputs
-genuinely lack the information to answer — author replacement steps for the gap). `resynthesize` is a
-`judge → synthesize` edge bounded by `max_resynth` (default 2); `replan` reuses `merge_replan` and the
-**shared `max_replans` budget** via a `judge → execute` edge, so the two corrective paths can never
-loop unbounded. The deterministic pre-checks (`engine/synthesis_judge.py::check_synthesis`) are free
-and catch mechanical faults the LLM shouldn't be paid to find — empty content despite completed steps,
-`output_format` non-compliance (JSON/bullet), and attribution to step ids that don't exist — and they
-are fed to the judge as evidence. Reported **confidence is calibrated** down to the completion ratio at
-accept time (`calibrated_confidence`), so a partial run can't claim full confidence. When either budget
-is exhausted the judge takes the `accept` path with status **`completed_degraded`** rather than looping
-— graceful degrade, never a hang. The deterministic checks decide nothing alone; as with the re-plan
-decider, the LLM is the only thing that adjudicates faithfulness/coverage, and it fires exactly once per
-synthesis pass. **(✅ built — `engine/synthesis_judge.py`, `engine/nodes.py::{synthesize_node,judge_node,
-route_after_judge}`; unit-tested `tests/engine/test_synthesis_judge.py` + loop/budget tests in
-`tests/engine/test_graph.py`; eval'd via `evals/judges/synthesis_judge_eval.py` +
-`evals/datasets/synthesis_judge.yaml` — a **label-based** eval (the component under test is itself an
-LLM judge, so each scenario carries a known-correct expected verdict and the harness compares the live
-verdict to that label; no second judge). The latest run scored **5/5 PASS** across grounded-accept,
-hallucinated-claim resynthesize, JSON-format resynthesize, coverage-gap replan, and a
-conflicting-sources accept — the judge named the two fabricated figures verbatim in its feedback and,
-on the gap case, authored two replacement `code` steps.)**
-
-**Design journey (how we got here).** The final shape above was not the first proposal — it came out
-of five forks I pushed the AI through, each tied to a rubric dimension:
-
-1. **Spotting the gap at all.** The AI's outer-loop design guarded planning (DAG validation),
-   execution (agent retries), and step-failure (bounded re-plan), but left `synthesize` shipping
-   whatever the model returned. I caught it with one question — *"where is the validation layer for
-   synthesis, and should it be able to retrigger the graph?"* The gap was the same blind spot as the
-   original static planner: a stage with no recovery path.
-2. **Deterministic-only vs. an LLM judge.** First instinct was to lean on cheap deterministic checks
-   alone. Rejected: mechanical checks can catch an empty answer or bad JSON, but they cannot tell that
-   a fluent paragraph contains a *fabricated* statistic. Hallucination detection needs a model that
-   reads the claims against the source outputs → the judge is mandatory, **but** the deterministic
-   checks stay as a free first tier so the LLM is never paid to find faults a parser can catch
-   (Performance / cost).
-3. **A new judge vs. moving the existing `evaluate` node.** The AI's reflex was to reuse `evaluate` by
-   moving it to after synthesis. Rejected (Architecture): `evaluate` is purpose-built for step-failure
-   classification — it takes a `failed_id`/`error` and decides re-plan — so it can't double as a
-   faithfulness judge, and relocating it would *un-guard* execution. Decision: a separate
-   post-synthesis judge; the pre-synthesis `evaluate` guard stays so broken executions never pay for a
-   synthesis call.
-4. **Four actions vs. three.** The draft had `accept | resynthesize | replan | rerun`. Rejected the
-   fourth: "re-run one step with a fix" is just a degenerate replan where the judge authors the
-   replacement step, so `rerun` folded into `replan` (KISS — fewer routes, one budget to reason about).
-5. **Where the loop lives — fat in-node loop vs. nested subgraph vs. flat nodes.** The AI proposed a
-   nested synthesis subgraph. Rejected (Observability / testability): a `replan` has to reach the
-   *sibling* `execute` node, which is clumsy across a subgraph boundary, and an in-node `for`-loop
-   hides the loop from the trace and the checkpointer. Decision: **two flat graph nodes**
-   (`synthesize` → `judge`) with the corrective loops as ordinary edges, so every hop is traced,
-   checkpointed, and unit-testable — and `judge → execute` is a normal edge to a sibling. The cheap
-   remedy (`resynthesize`) is a tight `judge → synthesize` edge; the expensive one (`replan`) reuses
-   the shared `max_replans` budget so neither can loop unbounded.
-
-**Caveat — cancellation is cooperative.** `POST /tasks/{id}/cancel` sets a flag the scheduler checks
-between step launches, so it stops new work and reports completed steps, but does not interrupt a step
-already blocked inside a provider call (e.g. wedged on a `429` backoff) — so a run can briefly report
-`executing` right after a `cancelled` acknowledgement. Preemptive kill (task-per-call + per-step
-timeout) is deferred; see § 5. **(✅ built — `engine/monitor.py`, `engine/scheduler.py`.)**
+**Caveat — cancellation is cooperative.** `POST /tasks/{id}/cancel` sets a flag the scheduler checks between
+launches, so it stops new work and reports completed steps, but doesn't interrupt a step already blocked
+inside a provider call — a run can briefly report `executing` right after a `cancelled` ack. Preemptive kill
+is deferred (§5).
 
 ---
 
 ## 5. One Thing I Would Do Differently With More Time
 
-The orchestration layer is now built (sections 1–4 are ✅), so the remaining gaps are about
-**depth and durability**, not coverage. With more time I would (in order): (1) **deepen dynamic
-re-planning** — it is currently bounded to a single structural-failure re-ask; richer would be a
-multi-attempt patch-planner that re-scopes only the failed sub-DAG instead of re-planning the
-remainder; (2) move task/plan state from the in-memory `RunRegistry` to a **persistent store** (and
-swap `MemorySaver` for a durable checkpointer) so `GET /tasks/{id}` survives a restart; (3) **stream
-intermediate results** over the trace (SSE/WebSocket) instead of only returning them at the end —
-this is the one honest spec skip (nice-to-have); (4) add an **end-to-end live test** against the real
-Gemini/Tavily APIs behind a quota-gated CI flag, complementing the fully-offline suite that ships
-today.
+The orchestration layer is built (§§1–4 ✅), so the remaining gaps are about depth, validation, and fit —
+not coverage. In rough priority:
 
-> Closed during a spec-validation pass: item (5) of an earlier draft — wiring `output_format` through
-> the `POST /tasks` body so the synthesis judge's `_check_format` is no longer dormant — is now done.
-> While validating against the assignment's literal **Task Format**, I found the request model rejected
-> the spec's JSON-object `constraints` (422) and never surfaced `output_format`; `api/models.py::TaskRequest`
-> now accepts `constraints` as object **or** string (normalized to fenced planner text) and threads
-> `output_format` end-to-end. ✅
+1. **More validation.** I validated against the assignment's literal Task Format / API / Final Result
+   examples and caught three real defects (see the note below and AI_USAGE.md) — but I'd want more: a wider
+   sweep of malformed and adversarial goals, constraint edge cases (conflicting/oversized constraints), and
+   concurrent multi-task load against the *live* providers, not just the offline doubles. I did a pass; it
+   deserves a deeper one.
+2. **More thinking about the actual use cases — and which sub-agents follow from them.** The four agents
+   (research / analysis / code / writing) satisfy the spec's example, but the *right* roster depends on what
+   the platform is genuinely for. With more time I'd profile the target workloads first and add agents to
+   match — e.g. a **data/SQL** agent, a **fact-checking / verification** agent, a **summarization** agent, or
+   a **tool/API-calling** agent — rather than assume the spec's four are the final set. The registry makes
+   adding one cheap (a new self-contained package + one registry entry), so the limiting factor is *deciding*
+   the roster, not wiring it.
+3. **More on tests — the area I'd extend most.** Today the suite is fully offline against fakes (deterministic
+   and fast, but blind to live behavior). I'd add: (a) an **end-to-end live test** behind a quota-gated CI
+   flag against the real APIs; (b) **property/fuzz tests** over the planner→validation path (random DAGs,
+   injected cycles, dangling deps); (c) **concurrency/race tests** asserting genuine overlap and correct
+   skip-cascades under many simultaneous tasks; and (d) **regression fixtures for each spec shape** so
+   conformance can't silently drift again. Tests are where this system most needs hardening before it carries
+   real traffic.
+4. **Durability.** Move task/plan state from the in-memory `RunRegistry` to a **persistent store** (and swap
+   `MemorySaver` for a durable checkpointer) so `GET /tasks/{id}` survives a restart.
+5. **Deeper dynamic re-planning** — currently one bounded structural-failure re-ask; richer would be a
+   multi-attempt patch-planner that re-scopes only the failed sub-DAG. And **true streaming of intermediate
+   content** (the SSE endpoint today emits progress, not partial content) — the one honest nice-to-have skip.
 
-> Component-level plans and the full requirements-compliance matrix are kept as internal working
-> notes outside the submission tree.
+> Closed during a spec-validation pass: wiring `output_format` through the `POST /tasks` body — the request
+> model rejected the spec's JSON-object `constraints` (422) and never surfaced `output_format`.
+> `api/models.py::TaskRequest` now accepts `constraints` as object **or** string and threads `output_format`
+> end-to-end. ✅
+>
+> Component-level plans and the full requirements-compliance matrix are kept as internal notes outside the
+> submission tree.

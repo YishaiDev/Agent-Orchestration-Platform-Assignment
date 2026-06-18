@@ -15,7 +15,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -353,25 +353,7 @@ def test_result_matches_spec_output_format() -> None:
     assert payload["est_cost_usd"] is not None
 
 
-def _main() -> None:
-    tests = [
-        test_web_search_stops_at_max_search_calls,
-        test_recursion_limit_halts_no_progress_loop,
-        test_sources_are_grounded_hosts,
-        test_compaction_fires_and_agent_still_returns,
-        test_tavily_ttl_cache_skips_second_network_call,
-        test_tavily_key_and_runtime_absent_from_tool_schema,
-        test_actual_cost_matches_price_table,
-        test_two_research_calls_run_concurrently,
-        test_result_matches_spec_output_format,
-        test_research_reasks_and_recovers_on_malformed_tool_call,
-        test_research_gives_up_after_exhausting_retries,
-    ]
-    for test in tests:
-        test()
-        print(f"PASS {test.__name__}")
-    print(f"\n{len(tests)} passed")
-
-
 if __name__ == "__main__":
-    _main()
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-v"]))

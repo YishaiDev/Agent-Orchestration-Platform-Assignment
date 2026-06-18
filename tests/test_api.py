@@ -1,10 +1,11 @@
 """Offline tests for the HTTP API (FastAPI TestClient, fake models + runner, no network).
 
-Covers the six endpoints: task submission, live status/trace, result retrieval (incl. the
-not-ready 409 and unknown-task 404), cooperative cancel returning completed steps, and the agent
-catalog. The full submit->poll->result path drives the real graph with injected fakes.
+Covers the endpoints end to end with injected fakes: task submission, live status/trace, result
+retrieval (incl. the not-ready 409 and unknown-task 404), the validated plan view, cooperative
+cancel returning completed steps, the SSE stream, and the agent catalog. The final test folds the
+former ``validate_spec_shape`` script into a single assertion-per-field conformance check.
 
-Run standalone: ``python tests/engine/test_api.py`` or via pytest.
+Run standalone: ``python tests/test_api.py`` or via pytest.
 """
 
 from __future__ import annotations
@@ -14,12 +15,13 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-os.environ.setdefault("GOOGLE_API_KEY", "test-key")
 os.environ.setdefault("GROQ_API_KEY", "test-key")
+os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+os.environ.setdefault("TAVILY_API_KEY", "test-key")
 
 from app.src.api.app import create_app  # noqa: E402
 from app.src.engine.monitor import RunMonitor  # noqa: E402
@@ -39,11 +41,15 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 
 class _Raw:
+    """Minimal model message carrying token usage metadata."""
+
     def __init__(self) -> None:
         self.usage_metadata = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
 
 
 class _Runnable:
+    """Structured-output runnable popping scripted outputs keyed by schema name."""
+
     def __init__(self, model: ScriptedModel, schema_name: str) -> None:
         self._model = model
         self._name = schema_name
@@ -65,6 +71,8 @@ class ScriptedModel:
 
 
 class FakeRunner:
+    """Step runner returning a deterministic completed result for each step."""
+
     async def __call__(self, step: ExecutionStep, results: dict, session: str) -> AgentResult:
         return AgentResult(
             step_id=step.id,
@@ -77,6 +85,7 @@ class FakeRunner:
 
 
 def _two_step_draft() -> PlannerDraft:
+    """A research-then-analyze planner draft for the scripted runs."""
     return PlannerDraft(
         reasoning="research then analyze",
         steps=[
@@ -126,6 +135,9 @@ def _poll_until_terminal(client: TestClient, task_id: str, timeout: float = 5.0)
             return body
         time.sleep(0.02)
     return body
+
+
+# --- endpoints ---
 
 
 def test_submit_poll_and_result() -> None:
@@ -240,23 +252,81 @@ def test_stream_emits_sse_events_until_terminal() -> None:
     assert '"status": "completed"' in resp.text
 
 
-def _main() -> None:
-    tests = [
-        test_submit_poll_and_result,
-        test_concurrent_submissions_tracked_independently,
-        test_unknown_task_is_404,
-        test_result_not_ready_is_409,
-        test_cancel_returns_completed_steps,
-        test_agents_catalog_lists_four,
-        test_plan_endpoint_exposes_validated_plan,
-        test_plan_not_ready_is_409,
-        test_stream_emits_sse_events_until_terminal,
-    ]
-    for test in tests:
-        test()
-        print(f"PASS {test.__name__}")
-    print(f"\n{len(tests)} passed")
+# --- spec-shape conformance (folds the former validate_spec_shape script) ---
+
+
+def _assert_status_shape(body: dict) -> None:
+    """The status payload exposes the progress block and a trace list."""
+    progress = body["progress"]
+    for key in ("total_steps", "completed_steps", "current_step"):
+        assert key in progress, f"status.progress missing {key}"
+    assert isinstance(body["execution_trace"], list)
+
+
+def _assert_trace_entry(entry: dict) -> None:
+    """Each trace entry carries identity, status, output, tokens, timing, and timestamps."""
+    for key in ("step_id", "agent", "status", "tokens_used", "execution_time_ms"):
+        assert key in entry, f"trace entry missing {key}"
+    assert "content" in entry["output"]
+    assert "started_at" in entry and "completed_at" in entry
+
+
+def _assert_result_shape(body: dict, output_format: str) -> None:
+    """The result payload carries typed totals and a format-echoing result block."""
+    assert isinstance(body["task_id"], str)
+    assert isinstance(body["status"], str)
+    assert isinstance(body["execution_trace"], list)
+    assert isinstance(body["total_tokens"], int)
+    assert isinstance(body["total_time_ms"], int)
+    result = body["result"]
+    assert isinstance(result["content"], str)
+    assert isinstance(result["word_count"], int)
+    assert result["format"] == output_format
+
+
+def _assert_plan_shape(body: dict) -> None:
+    """The plan view exposes typed steps and the parallel-group schedule."""
+    assert isinstance(body["parallel_groups"], list)
+    for step in body["steps"]:
+        for key in ("id", "agent", "action", "dependencies"):
+            assert key in step, f"plan step missing {key}"
+
+
+def _assert_agents_shape(body: dict) -> None:
+    """The catalog lists at least the four registered agents with full descriptors."""
+    agents = body["agents"]
+    assert len(agents) >= 4
+    names = {a["name"] for a in agents}
+    assert {"research", "analysis", "code", "writing"} <= names
+    for agent in agents:
+        for key in ("name", "description", "capabilities", "status"):
+            assert key in agent, f"agent descriptor missing {key}"
+
+
+def test_spec_shape_conformance() -> None:
+    with TestClient(_scripted_app()) as client:
+        created = client.post("/tasks", json={"goal": "study X", "output_format": "markdown"})
+        assert created.status_code == 202
+        body = created.json()
+        assert isinstance(body["task_id"], str)
+        assert body["status"] == "planning"
+        task_id = body["task_id"]
+
+        status = _poll_until_terminal(client, task_id)
+        _assert_status_shape(status)
+        for entry in status["execution_trace"]:
+            _assert_trace_entry(entry)
+
+        _assert_result_shape(client.get(f"/tasks/{task_id}/result").json(), "markdown")
+        _assert_plan_shape(client.get(f"/tasks/{task_id}/plan").json())
+        _assert_agents_shape(client.get("/agents").json())
+
+        cancel = client.post(f"/tasks/{task_id}/cancel").json()
+        assert cancel["status"] == "cancelled"
+        assert isinstance(cancel["completed_steps"], list)
 
 
 if __name__ == "__main__":
-    _main()
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-v"]))

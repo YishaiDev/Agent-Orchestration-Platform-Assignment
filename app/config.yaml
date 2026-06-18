@@ -1,6 +1,6 @@
 # Which LLM provider to use. Model ids + pricing per tier live in llm_config.yml.
 # Switch the whole platform between providers by changing this one line.
-provider: gemini        # groq | gemini
+provider: groq        # groq | gemini
 
 writing_agent:
   model: { tier: big, temperature: 0.4 }

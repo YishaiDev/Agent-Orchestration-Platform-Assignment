@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -299,24 +299,7 @@ def test_two_analysis_calls_run_concurrently() -> None:
     assert elapsed < 0.35
 
 
-def _main() -> None:
-    tests = [
-        test_compute_expression_exact_and_rejects_non_arithmetic,
-        test_compute_metrics_aggregate_dataset,
-        test_compute_budget_caps_calls,
-        test_untrusted_input_is_fenced,
-        test_tokens_accrue_into_context,
-        test_compaction_fires_and_agent_still_returns,
-        test_low_confidence_marks_completed_degraded,
-        test_model_error_yields_failed_status,
-        test_result_matches_spec_output_format,
-        test_two_analysis_calls_run_concurrently,
-    ]
-    for test in tests:
-        test()
-        print(f"PASS {test.__name__}")
-    print(f"\n{len(tests)} passed")
-
-
 if __name__ == "__main__":
-    _main()
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-v"]))

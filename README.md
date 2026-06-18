@@ -32,12 +32,13 @@ Goal ─▶  plan ─▶ execute ─▶ evaluate ──(structural failure: re-p
   steps and
   routes straight to the re-plan decider.
 
-The only LLM calls are the **planner**, the **re-plan decider**, and the **synthesizer**; step
-execution is ordinary observable code. See [DECISIONS.md](DECISIONS.md) for the design rationale and
-[AI_USAGE.md](AI_USAGE.md) for how the AI was driven. For the cross-cutting concerns, see
-[app/ARCHITECTURE.md](app/ARCHITECTURE.md) (the full graph diagram — outer loop, sub-agents, middleware),
-[app/SECURITY.md](app/SECURITY.md) (untrusted input, secrets, schema validation, prompt-injection) and
-[app/OBSERVABILITY.md](app/OBSERVABILITY.md) (execution trace, progress tracking, failure diagnosis).
+Further reading:
+
+- [app/ARCHITECTURE.md](app/ARCHITECTURE.md) — the full system design, including a complete **Mermaid graph** that visualizes the whole flow (outer loop, the four sub-agents, and middleware) to make it easy to follow at a glance.
+- [app/SECURITY.md](app/SECURITY.md) — untrusted input, secrets handling, schema validation, and prompt-injection defenses.
+- [app/OBSERVABILITY.md](app/OBSERVABILITY.md) — the execution trace, live progress tracking, and failure diagnosis.
+- [DECISIONS.md](DECISIONS.md) — the design rationale behind the architecture.
+- [AI_USAGE.md](AI_USAGE.md) — how the AI was driven during development.
 
 ## Architecture
 
@@ -177,15 +178,34 @@ uv run python cli.py "Compare Postgres and MySQL for analytics and write a short
 
 ## Test
 
-All tests run **offline** with fake agents and fake models (no provider quota, no network). Each test
-file is independently runnable; `run_all_tests.py` runs the whole suite via pytest.
+All tests run **offline** with fake agents and fake models (no provider quota, no network). The suite
+is **127 tests across 10 files**, one per app zone (`test_planning`, `test_execution`, `test_recovery`,
+`test_synthesis`, `test_graph`, `test_api`, and one file per sub-agent). Each test file is
+independently runnable; `run_all_tests.py` runs the whole suite via pytest.
 
 ```powershell
 cd app
 uv run python ../tests/run_all_tests.py        # full suite
-uv run pytest ../tests/engine -q                # just the engine + API tests
-uv run python ../tests/engine/test_api.py       # one file, standalone
+uv run pytest ../tests/test_api.py -q            # one zone (API + spec conformance)
+uv run python ../tests/test_api.py               # one file, standalone
 ```
+
+See [`tests/README.md`](tests/README.md) for the zone-to-file map.
+
+### In Docker
+
+The shipped image is lean by design — it omits the `dev` group (pytest) and the `tests/` dir, so
+tests run from the source checkout above. To run the suite inside the container without changing the
+image, build it, then mount `tests/` into a throwaway container and let `uv` pull the `dev` group:
+
+```powershell
+docker build -t agent-orchestration-platform .
+docker run --rm -v "${PWD}/tests:/workspace/tests:ro" agent-orchestration-platform `
+  uv run --group dev pytest /workspace/tests -q
+```
+
+The tests set their own dummy provider keys, so no `.env` or network access is needed (the one-time
+`uv run --group dev` step fetches pytest from PyPI).
 
 The six spec-named scenarios are covered explicitly: task **submission**, **plan generation**,
 **sequential execution** (dependency chain, outputs passed downstream), **parallel execution**,
@@ -348,7 +368,7 @@ What's applied against the assignment's Technical Requirements:
 | Dependency-based execution | ✅ | `engine/scheduler.py` (deps gate each launch) |
 | Result synthesis | ✅ | `engine/synthesizer.py`, conflict-resolving + provenance |
 | Containerized (docker-compose) | ✅ | `Dockerfile`, `docker-compose.yml` |
-| ≥6 meaningful tests | ✅ | 125 passing: submission, plan generation, sequential & parallel execution, error handling, synthesis |
+| ≥6 meaningful tests | ✅ | 127 passing: submission, plan generation, sequential & parallel execution, error handling, synthesis |
 | Sequential execution | ✅ | `concurrency: 1` (same scheduler) |
 | Parallel step execution | ✅ | continuous-concurrency scheduler |
 | Progress tracking | ✅ | `GET /tasks/{id}` (live) |
